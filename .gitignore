@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/sdkconfig.local
+firmware/managed_components/
+firmware/dependencies.lock
+artifacts/
+.venv/

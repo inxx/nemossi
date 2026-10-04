@@ -1,0 +1,5 @@
+# Copy to sdkconfig.local (ignored by Git) only after a supported adapter exists.
+# These reserved fields do not enable networking or create a dot connection.
+CONFIG_NEMOSSI_WIFI_SSID=""
+CONFIG_NEMOSSI_WIFI_PASSWORD=""
+CONFIG_NEMOSSI_DOT_ADAPTER_ORIGIN=""

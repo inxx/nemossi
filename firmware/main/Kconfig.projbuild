@@ -1,0 +1,47 @@
+menu "Nemossi"
+
+config NEMOSSI_DEMO_MODE
+    bool "Simulate face states locally (no audio or dot connection)"
+    default y
+    help
+        A PLUS or touch press starts a local face demonstration. This mode never
+        records audio, opens a network socket, or represents a connected dot.
+        Disabling it shows the blocked transport boundary on input.
+
+config NEMOSSI_TOUCH_ENABLED
+    bool "Initialize the CST816 touch controller"
+    default y
+
+config NEMOSSI_UI_FPS
+    int "Face update frames per second"
+    range 5 30
+    default 30
+
+config NEMOSSI_BACKLIGHT_PERCENT
+    int "LCD backlight percentage"
+    range 0 100
+    default 60
+
+menu "Reserved local adapter configuration (currently unused)"
+
+config NEMOSSI_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config NEMOSSI_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Reserved for a future verified adapter. The current firmware does not
+        connect to Wi-Fi. Generated sdkconfig/build files can contain this in
+        plaintext; keep them local and ignored.
+
+config NEMOSSI_DOT_ADAPTER_ORIGIN
+    string "Officially verified dot adapter origin"
+    default ""
+    help
+        No official device transport is currently verified. This value is not
+        consumed by the demo or the blocked adapter.
+
+endmenu
+endmenu

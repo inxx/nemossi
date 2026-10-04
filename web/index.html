@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f2ea">
+    <title>네모씨 · dot 통화 단말 데모</title>
+    <link rel="stylesheet" href="/style.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <a class="brand" href="/" aria-label="네모씨 홈">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>네모씨<small>nemossi</small></span>
+        </a>
+        <div class="server-status" id="connectionStatus" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connectionLabel">서버 확인 중</span></div>
+      </header>
+
+      <div class="intro">
+        <p class="eyebrow">A SMALL FACE, A FAMILIAR VOICE</p>
+        <h1>곁에 둘 작은 얼굴.</h1>
+        <p class="intro-copy">dot 통화 단말 · 데모 <span class="separator" aria-hidden="true">/</span> <span>dot 연결 미확인</span></p>
+      </div>
+
+      <section class="workspace" aria-label="네모씨 단말 미리보기">
+        <div class="face-panel">
+          <div class="panel-topline"><span>화면 미리보기</span><span class="dimension">240 × 240</span></div>
+          <div class="device">
+            <div class="display"><canvas id="faceCanvas" width="240" height="240" role="img" aria-label="네모씨: 기다리는 중"></canvas></div>
+            <span class="device-dot" aria-hidden="true"></span>
+          </div>
+          <div class="face-caption">
+            <span class="state-pill" id="stateLabel">기다리는 중</span>
+            <p id="faceSubtitle">안녕하세요. 네모씨예요.</p>
+          </div>
+          <div class="controls">
+            <button class="button button-primary talk-button" id="talkButton" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 10.5v1a6.5 6.5 0 0 0 13 0v-1M12 18v3m-3 0h6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              <span id="talkLabel">대화하기</span>
+            </button>
+            <button class="button button-secondary" id="cancelButton" type="button" disabled>취소</button>
+            <button class="button button-icon" id="settingsButton" type="button" aria-label="설정 열기" aria-haspopup="dialog">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 3-.5 2-2 1-2-.5-2 3 1.5 1.5v3L2.5 15l2 3 2-.5 2 1 .5 2h4l.5-2 2-1 2 .5 2-3-1.5-2.5v-3L20.5 9l-2-3-2 .5-2-1L13 3Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="11.5" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
+            </button>
+          </div>
+          <p class="control-hint" id="talkHint">마이크 없이 데모를 시작해요. Space 키로도 가능해요.</p>
+        </div>
+
+        <aside class="conversation-panel" aria-label="단말 데모 대화">
+          <div class="conversation-header"><div><p class="eyebrow">TRY A CONVERSATION</p><h2>한마디 건네 보세요.</h2></div><span class="mock-badge">MOCK</span></div>
+          <div class="conversation-log" id="conversationLog" role="log" aria-live="polite" aria-relevant="additions" aria-label="대화 기록">
+            <div class="welcome" id="welcomeMessage"><span class="welcome-line" aria-hidden="true"></span><p>짧은 인사부터 시작해 볼까요?</p><small>지금은 로컬 데모 서버와<br>얼굴 · 입력 · 소리의 흐름을 확인해요.</small></div>
+          </div>
+          <form id="textForm" class="text-form">
+            <label class="sr-only" for="messageInput">네모씨에게 보낼 말</label>
+            <input id="messageInput" name="text" type="text" maxlength="500" autocomplete="off" placeholder="하고 싶은 말을 적어 주세요" required>
+            <button id="sendButton" class="send-button" type="submit" aria-label="메시지 보내기"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          </form>
+          <div class="demo-note"><span aria-hidden="true">♪</span><p>재생되는 소리는 합성 데모 신호예요.<br>실제 음성 합성이나 dot 통화가 아니에요.</p></div>
+        </aside>
+      </section>
+
+      <div class="notice" id="notice" role="status" hidden><span id="noticeText"></span><button id="retryAudioButton" type="button" hidden>데모 소리 재생</button><button id="retryConnectionButton" type="button" hidden>서버 다시 확인</button></div>
+
+      <footer class="footer">
+        <div class="device-facts"><span>Mac mini · 로컬 mock</span><span>ESP32-S3 · 실물 미검증</span></div>
+        <div class="footer-controls"><label for="stateSelect">표정 확인</label><select id="stateSelect"><option value="auto">자동</option><option value="idle">대기</option><option value="listening">듣기</option><option value="thinking">생각</option><option value="speaking">말하기</option><option value="happy">기쁨</option><option value="confused">갸우뚱</option><option value="error">오류</option><option value="sleep">잠</option></select><button class="text-button" id="dotInfoButton" type="button" aria-haspopup="dialog">dot 연결 안내 <span aria-hidden="true">↗</span></button></div>
+      </footer>
+    </main>
+
+    <dialog class="settings-dialog" id="settingsDialog" aria-labelledby="settingsTitle">
+      <div class="dialog-heading"><div><p class="eyebrow">MAKE IT YOURS</p><h2 id="settingsTitle">네모씨 설정</h2></div><button class="close-button" id="closeSettingsButton" type="button" aria-label="설정 닫기">×</button></div>
+      <div class="setting-row"><div><label for="volumeInput">데모 소리 크기</label><p>브라우저에서 재생되는 합성 신호</p></div><output id="volumeOutput" for="volumeInput">35%</output><input id="volumeInput" type="range" min="0" max="100" value="35"></div>
+      <div class="setting-row"><div><label for="brightnessInput">화면 밝기</label><p>브라우저 얼굴 미리보기에만 적용</p></div><output id="brightnessOutput" for="brightnessInput">100%</output><input id="brightnessInput" type="range" min="55" max="100" value="100"></div>
+      <div class="microphone-setting"><div><label for="microphoneToggle">마이크 사용</label><p id="microphoneHint">선택하면 브라우저에 권한을 요청해요.<br>누른 채 말하면 로컬 mock 서버로 보내요.</p></div><label class="switch"><input id="microphoneToggle" type="checkbox" aria-describedby="microphoneHint"><span aria-hidden="true"></span></label></div>
+      <div class="setting-truth"><p><span class="truth-dot" aria-hidden="true"></span>현재 연결: 로컬 mock 데모</p><p>dot 연결 미확인 · 실제 보드와 오디오 미검증</p><small>마이크는 녹음이 끝나면 해제해요. 밝기와 소리 크기만 이 브라우저에 저장해요.</small></div>
+      <button class="button button-primary settings-done" id="doneSettingsButton" type="button">완료</button>
+    </dialog>
+
+    <dialog class="info-dialog" id="dotDialog" aria-labelledby="dotTitle">
+      <div class="dialog-heading"><div><p class="eyebrow">CONNECTION STATUS</p><h2 id="dotTitle">dot 연결은 아직 확인 중이에요.</h2></div><button class="close-button" id="closeDotButton" type="button" aria-label="연결 안내 닫기">×</button></div>
+      <p>지금 대화하는 dot의 통화를 네모씨로 전달할 공식 외부 오디오 전송 경로를 아직 확인하지 못했어요.</p>
+      <p>지금 데모는 로컬 서버와 얼굴 · 입력 · 소리의 흐름을 검증해요. dot 통화에 연결되지는 않아요.</p>
+      <div class="connection-fact"><span>dot 연결</span><strong>미확인</strong></div>
+      <button class="button button-primary settings-done" id="doneDotButton" type="button">확인했어요</button>
+    </dialog>
+  </body>
+</html>
