@@ -80,7 +80,7 @@ class BridgeHTTPTests(unittest.TestCase):
         health = json.loads(payload)
         self.assertTrue(health["ok"])
         self.assertEqual(health["mode"], "mock")
-        self.assertEqual(health["version"], "0.1.0")
+        self.assertEqual(health["version"], "0.2.0")
         self.assertEqual(health["audio"], {"sample_rate": 16000, "channels": 1, "format": "wav"})
         self.assertFalse(health["dot_connected"])
         self.assertFalse(health["dot_transport_supported"])

@@ -7,30 +7,25 @@ import json
 import os
 import re
 import socket
-import struct
 import threading
 import time
-import uuid
-from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from . import __version__
+from .hub import MacHub
+from .protocol import (
+    AudioStore, RequestError, MAX_TEXT_CHARS, MAX_JSON_BYTES, MAX_AUDIO_SECONDS,
+    MAX_AUDIO_BYTES, MAX_RESPONSE_CHARS, validate_wav,
+)
 from .transport import (
     SAMPLE_RATE, MockTransport, TransportAdapter, TransportUnavailable,
     TurnInput, UnsupportedDotTransport,
 )
 
 
-MAX_TEXT_CHARS = 1200
-MAX_JSON_BYTES = 8192
-MAX_AUDIO_SECONDS = 15
-MAX_AUDIO_BYTES = SAMPLE_RATE * 2 * MAX_AUDIO_SECONDS + 4096
-MAX_RESPONSE_CHARS = 2400
-AUDIO_TTL_SECONDS = 120
-MAX_STORED_AUDIO = 64
 STATIC_FILES = {
     "index.html": "text/html; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
@@ -38,13 +33,8 @@ STATIC_FILES = {
     "face.js": "text/javascript; charset=utf-8",
     "audio.js": "text/javascript; charset=utf-8",
     "recorder-worklet.js": "text/javascript; charset=utf-8",
+    "device.js": "text/javascript; charset=utf-8",
 }
-
-
-class RequestError(Exception):
-    def __init__(self, status: int, code: str, message: str) -> None:
-        super().__init__(message)
-        self.status, self.code, self.message = status, code, message
 
 
 def _loopback_host(host: str) -> bool:
@@ -56,91 +46,12 @@ def _loopback_host(host: str) -> bool:
         raise ValueError("--host must be localhost or a literal IPv4/IPv6 address")
 
 
-def validate_wav(payload: bytes) -> float:
-    """Validate the complete RIFF file before handing any audio to a transport."""
-    invalid = RequestError(400, "invalid_wav", "A complete PCM WAV file is required.")
-    if len(payload) < 44 or payload[:4] != b"RIFF" or payload[8:12] != b"WAVE":
-        raise invalid
-    if struct.unpack_from("<I", payload, 4)[0] != len(payload) - 8:
-        raise invalid
-    offset = 12
-    fmt = None
-    data = None
-    while offset < len(payload):
-        if len(payload) - offset < 8:
-            raise invalid
-        tag, length = struct.unpack_from("<4sI", payload, offset)
-        offset += 8
-        end = offset + length
-        padded_end = end + (length % 2)
-        if padded_end > len(payload):
-            raise invalid
-        if tag == b"fmt ":
-            if fmt is not None or length not in (16, 18):
-                raise invalid
-            fmt = payload[offset:end]
-            if length == 18 and fmt[16:] != b"\x00\x00":
-                raise invalid
-        elif tag == b"data":
-            if data is not None:
-                raise invalid
-            data = payload[offset:end]
-        offset = padded_end
-    if fmt is None or data is None:
-        raise invalid
-    encoding, channels, rate, byte_rate, block_align, bits = struct.unpack_from("<HHIIHH", fmt)
-    if (encoding, channels, rate, bits, block_align, byte_rate) != (1, 1, SAMPLE_RATE, 16, 2, SAMPLE_RATE * 2):
-        raise RequestError(422, "unsupported_audio_format", "Use mono PCM16 WAV at 16000 Hz.")
-    if not data or len(data) % 2:
-        raise invalid
-    duration = len(data) / (SAMPLE_RATE * 2)
-    if duration > MAX_AUDIO_SECONDS:
-        raise RequestError(413, "audio_too_long", "Audio must be 15 seconds or shorter.")
-    return duration
-
-
-class AudioStore:
-    """Short-lived audio, with a fixed count bound and no filesystem persistence."""
-
-    def __init__(self, ttl: float = AUDIO_TTL_SECONDS, capacity: int = MAX_STORED_AUDIO) -> None:
-        if ttl <= 0 or capacity <= 0:
-            raise ValueError("Audio store limits must be positive")
-        self.ttl, self.capacity = ttl, capacity
-        self._items = OrderedDict()  # type: OrderedDict[str, Tuple[float, bytes]]
-        self._lock = threading.Lock()
-
-    def _expire(self, now: float) -> None:
-        while self._items:
-            key, (expiry, _) = next(iter(self._items.items()))
-            if expiry > now:
-                break
-            del self._items[key]
-
-    def put(self, payload: bytes) -> str:
-        if len(payload) > MAX_AUDIO_BYTES:
-            raise ValueError("Transport returned oversized audio")
-        with self._lock:
-            now = time.monotonic()
-            self._expire(now)
-            while len(self._items) >= self.capacity:
-                self._items.popitem(last=False)
-            key = uuid.uuid4().hex
-            self._items[key] = (now + self.ttl, payload)
-            return key
-
-    def get(self, key: str) -> Optional[bytes]:
-        with self._lock:
-            self._expire(time.monotonic())
-            entry = self._items.get(key)
-            return entry[1] if entry else None
-
-
 class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, address: Tuple[str, int], web_root: Path, transport: TransportAdapter,
-                 device_token: Optional[str]) -> None:
+                 device_token: Optional[str], clock: Optional[Callable[[], float]] = None) -> None:
         self.bind_host = address[0]
         loopback = _loopback_host(self.bind_host)
         self.require_token = not loopback or device_token is not None
@@ -151,7 +62,8 @@ class BridgeServer(ThreadingHTTPServer):
         self.device_token = device_token
         self.web_root = web_root.resolve()
         self.transport = transport
-        self.audio_store = AudioStore()
+        self.audio_store = AudioStore(clock=clock)
+        self.hub = MacHub(transport, self.audio_store, clock=clock)
         self._request_slots = threading.BoundedSemaphore(16)
         if ":" in self.bind_host:
             self.address_family = socket.AF_INET6
@@ -200,7 +112,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
         self._error(RequestError(code, "http_error", "The HTTP request could not be processed."))
 
-    def _send(self, status: int, payload: bytes, content_type: str) -> None:
+    def _send(self, status: int, payload: bytes, content_type: str,
+              extra_headers: Optional[Dict[str, str]] = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -210,14 +123,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Permissions-Policy", "microphone=(self), camera=(), geolocation=()")
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(payload)
 
-    def _json(self, status: int, value: Dict[str, Any]) -> None:
-        self._send(status, json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"), "application/json; charset=utf-8")
+    def _json(self, status: int, value: Dict[str, Any], extra_headers: Optional[Dict[str, str]] = None) -> None:
+        self._send(status, json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"), "application/json; charset=utf-8", extra_headers)
 
     def _error(self, error: RequestError) -> None:
         self.close_connection = True
@@ -298,6 +213,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             path = self._guard()
             if path == "/api/health":
                 self._json(200, self._health())
+            elif path == "/api/hub":
+                self._json(200, self.server.hub.snapshot())
+            elif path == "/api/device":
+                self._json(200, self.server.hub.device.snapshot())
             elif path == "/api/capabilities":
                 self._json(200, {"transport": self.server.transport.name, "dot_connected": False, "dot_transport_supported": False,
                                  "dot_support_status": "unconfirmed", "real_stt": False, "real_tts": False,
@@ -305,6 +224,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                                  "max_audio_seconds": MAX_AUDIO_SECONDS, "max_text_chars": MAX_TEXT_CHARS,
                                  "audio": {"sample_rate": SAMPLE_RATE, "channels": 1, "bits_per_sample": 16, "format": "wav"}})
             elif re.fullmatch(r"/api/audio/[0-9a-f]{32}\.wav", path):
+                self.server.hub.device.snapshot()  # Expire leases/deadlines before serving device audio.
                 payload = self.server.audio_store.get(path[11:-4])
                 if payload is None:
                     raise RequestError(404, "audio_not_found", "Audio expired or was not found.")
@@ -354,26 +274,50 @@ class BridgeHandler(BaseHTTPRequestHandler):
             raise RequestError(400, "invalid_session", "Session ID must be 1–64 ASCII letters, digits, underscores or hyphens.")
         return value
 
+    def _json_input(self) -> Any:
+        types = self.headers.get_all("Content-Type", [])
+        if len(types) != 1 or types[0].split(";", 1)[0].strip().lower() != "application/json":
+            raise RequestError(415, "unsupported_media_type", "Use application/json.")
+        payload = self._body(MAX_JSON_BYTES)
+
+        def unique_object(pairs: Any) -> Dict[str, Any]:
+            value = {}
+            for key, entry in pairs:
+                if key in value:
+                    raise ValueError("Duplicate object key")
+                value[key] = entry
+            return value
+
+        def invalid_constant(value: str) -> Any:
+            raise ValueError("Non-finite number")
+
+        try:
+            return json.loads(payload.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            raise RequestError(400, "invalid_json", "Request must contain valid UTF-8 JSON.")
+
+    def _device_payload(self, required: set, optional: Optional[set] = None) -> Dict[str, Any]:
+        value = self._json_input()
+        if (not isinstance(value, dict) or not required.issubset(value)
+                or not set(value).issubset(required | (optional or set()))):
+            raise RequestError(400, "invalid_device_request", "Device request fields are invalid.")
+        return value
+
+    def _device_header(self, name: str, required: bool = True) -> Optional[str]:
+        values = self.headers.get_all(name, [])
+        if not values and not required:
+            return None
+        if len(values) != 1 or not re.fullmatch(r"[0-9a-f]{32}", values[0]):
+            raise RequestError(400, "invalid_device_request", "A valid device connection/turn header is required.")
+        return values[0]
+
     def _turn_input(self) -> TurnInput:
         types = self.headers.get_all("Content-Type", [])
         if len(types) != 1:
             raise RequestError(415, "unsupported_media_type", "Use application/json or audio/wav.")
         content_type = types[0].split(";", 1)[0].strip().lower()
         if content_type == "application/json":
-            payload = self._body(MAX_JSON_BYTES)
-            def unique_object(pairs: Any) -> Dict[str, Any]:
-                value = {}
-                for key, entry in pairs:
-                    if key in value:
-                        raise ValueError("Duplicate object key")
-                    value[key] = entry
-                return value
-            def invalid_constant(value: str) -> Any:
-                raise ValueError("Non-finite number")
-            try:
-                value = json.loads(payload.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
-            except (ValueError, UnicodeDecodeError, RecursionError):
-                raise RequestError(400, "invalid_json", "Request must contain valid UTF-8 JSON.")
+            value = self._json_input()
             if not isinstance(value, dict) or not set(value).issubset({"text", "session_id"}):
                 raise RequestError(400, "invalid_turn", "Send text and an optional session_id.")
             text_value = value.get("text")
@@ -396,19 +340,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             path = self._guard()
-            if path != "/api/turn":
+            device = self.server.hub.device
+            if path == "/api/device/connect":
+                self._device_payload(set())
+                snapshot, created = device.connect_result()
+                self._json(200, snapshot, {"X-Device-Connection-Created": "true" if created else "false"})
+            elif path == "/api/device/disconnect":
+                value = self._device_payload({"connection_id"})
+                self._json(200, device.disconnect(value["connection_id"]))
+            elif path == "/api/device/event":
+                value = self._device_payload({"connection_id", "event"}, {"turn_id"})
+                if not isinstance(value["event"], str) or ("turn_id" in value and value["turn_id"] is None):
+                    raise RequestError(400, "invalid_device_request", "Device event fields are invalid.")
+                self._json(200, device.event(value["connection_id"], value["event"], value.get("turn_id")))
+            elif path == "/api/device/turn":
+                connection_id = self._device_header("X-Device-Connection-ID")
+                turn_id = self._device_header("X-Device-Turn-ID", required=False)
+                turn = self._turn_input()
+                if turn.audio_wav is not None and turn_id is None:
+                    raise RequestError(400, "invalid_device_request", "Audio input requires X-Device-Turn-ID from the listen event.")
+                self._json(200, self.server.hub.run_turn(turn, connection_id, turn_id))
+            elif path == "/api/turn":
+                self._json(200, self.server.hub.legacy_turn(self._turn_input()))
+            else:
                 raise RequestError(404, "not_found", "Resource not found.")
-            started = time.monotonic()
-            turn = self._turn_input()
-            reply = self.server.transport.exchange(turn)
-            if len(reply.text) > MAX_RESPONSE_CHARS or len(reply.transcript) > MAX_TEXT_CHARS:
-                raise ValueError("Transport returned oversized text")
-            validate_wav(reply.audio_wav)
-            audio_id = self.server.audio_store.put(reply.audio_wav)
-            self._json(200, {"turn_id": uuid.uuid4().hex, "transcript": reply.transcript,
-                             "text": reply.text, "mode": self.server.transport.name,
-                             "audio": {"url": "/api/audio/" + audio_id + ".wav", "sample_rate": SAMPLE_RATE, "format": "wav"},
-                             "duration_ms": int((time.monotonic() - started) * 1000)})
         except RequestError as error:
             self._error(error)
         except TransportUnavailable:
@@ -428,9 +383,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 
 def create_server(host: str = "127.0.0.1", port: int = 8765, web_root: Optional[Path] = None,
-                  transport: Optional[TransportAdapter] = None, device_token: Optional[str] = None) -> BridgeServer:
+                  transport: Optional[TransportAdapter] = None, device_token: Optional[str] = None,
+                  clock: Optional[Callable[[], float]] = None) -> BridgeServer:
     root = web_root if web_root is not None else Path(__file__).resolve().parent.parent / "web"
-    return BridgeServer((host, port), root, transport or MockTransport(), device_token)
+    return BridgeServer((host, port), root, transport or MockTransport(), device_token, clock=clock)
 
 
 def main() -> None:

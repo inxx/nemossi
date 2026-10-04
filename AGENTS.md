@@ -12,3 +12,6 @@ transport separate and fail clearly until an official supported path is verified
 - Do not install an SDK, flash a device, create credentials, call a paid API, or
   register a persistent service without reporting the specific target and scope.
 - Keep the demo's mock state distinct from an actual dot connection.
+- Keep Mac mini hub coordination separate from the Nemossi device lifecycle.
+- Smart glasses belong to a separate project. A future peer may use a phone
+  relay; do not assume a direct Mac link or a USB-only final Nemossi design.

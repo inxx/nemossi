@@ -22,8 +22,9 @@ def main():
         raise SystemExit("Node.js is required for the browser module tests.")
     if not (shutil.which("clang") or shutil.which("cc")):
         raise SystemExit("A C compiler is required for firmware host tests.")
-    run("Python HTTP integration", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
-    run("Browser audio modules", ["node", "--test", "tests/test_audio.mjs"])
+    run("Python HTTP integration", [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-v"])
+    browser_tests = sorted((ROOT / "tests").glob("test_*.mjs"))
+    run("Browser modules", ["node", "--test"] + [str(path) for path in browser_tests])
     for path in sorted((ROOT / "web").glob("*.js")):
         run("JavaScript syntax: {}".format(path.name), ["node", "--check", str(path)])
     run("Firmware model on host", ["sh", "firmware/tests/run_host_tests.sh"])
