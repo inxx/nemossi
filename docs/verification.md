@@ -1,5 +1,60 @@
 # 검증 기록
 
+## 2026-10-05 Muse + Mac 로컬 TTS 포트
+
+사용자가 승인한 새 PTT 경로를 구현했다. 기존 `firmware/model/face.c`와 model
+headers·LCD driver·GPIO 정의는 그대로 생성 프로젝트에 복사하며 기본+6표정
+렌더 회귀가 통과했다. 기존 browser mock 경로는 유지한다. [연결 절차](muse-connection.md).
+
+최종 소스에서 `NEMOSSI_MUSE_PROJECT=<staged esp32> python3 -B scripts/verify.py`가
+통과했다. 이 실행에서는 Muse 관련 검사가 skip되지 않았다.
+
+| 검사 | 결과 |
+| --- | --- |
+| Python HTTP·hub·CLI·Mac TTS·이미지 gate | 73개 통과: 기존 50 + TTS 16 + 이미지 7 |
+| Node 오디오·장치·얼굴 | 기존 29개 통과 |
+| JavaScript 문법 | 기존 5개 파일 통과 |
+| C 얼굴·서비스 | 기존 얼굴 15개 그룹·서비스 검사 통과, ASan·UBSan |
+| 생성한 Muse 세션·client·player | 15개 테스트 통과, ASan·UBSan |
+| 1.54 실제 audio backend의 host harness | 5개 그룹 통과, ASan·UBSan |
+| ESP-IDF 6.0.1 ESP32-S3 cross build | 성공, 토큰·TTS 설정 비어 있음 |
+| 생성 config·partition MD5·ESP checksum/SHA | 통과, 기존 partition geometry와 일치 |
+
+세션/client harness는 6,413개 assert로 부분 stream write·backpressure·세대 교체·
+취소 commit 경합·초기화 OOM·잘못된 HTTP/WAV·deadline·비공개 IPv4 제한을
+검사한다. 실제 생성 player·voice 코드에는 마지막 I2S 실패 전달, stop 뒤 500ms
+종료 대기, timeout 때 녹음 차단, OOM 때 worker 미생성 검사가 있다. 수정 전
+코드의 해당 3개 실패도 같은 oracle로 재현했다. 보드 backend는 TDM/STD 계약,
+48k stereo32 → 16k mono16 변환, codec sticky fault, volume·mute readback과
+부분 write 때 PA 차단을 검사한다. 이것은 실물 I2C/I2S 증거가 아니다.
+
+추가로 공식 SDK host suite를 실행했다(165개 실행). 새 포트의 log namespace
+차이를 수정한 뒤 공식 diagnostic 검사 6개가 모두 통과했다. 전체 suite는 통과로
+표시하지 않는다. 남은 차이는 추가 board 분기를 인식하지 못하는 기존 e-paper
+CMake regex, 새 TTS 함수 stub이 없는 stock chat harness, 의도적으로 제외한
+avatar fixture에 의존하는 serialchat import다. 변경한 세션은 위 전용 harness로
+검증했다. host PSA/mbedcrypto 부재로 Noise core 검사는 skip되었고, IDF 소스로
+실행하는 실제 ECDH·ECDSA·AES-GCM·페어링 암호화 검사는 통과했다.
+
+Mac에 설치된 Yuna로 중립 한국어 문장을 파일로 합성했다. canonical WAV는
+31,440 bytes·16kHz mono PCM16·0.981125초였고 임시 파일은 정리됐다. 사용자
+음성 녹음·실제 Muse 답·스피커 재생은 수행하지 않았다. LAN 서버와 지속 서비스도
+활성화하지 않았다.
+
+최종 빌드 확인용 앱은 **1,475,872 bytes**이며 SHA256은
+`ea761ba1e2c563e52bc3b87f03a2fcaf52a770912c57fabf4d9c304120d3f679`다.
+기존 app0 `0x10000..0x340000`에 들어가고 예상 4KiB sector erase 범위는
+`0x10000..0x179000`(끝 주소 제외)다. bootloader·table·otadata를 쓰지 않는
+계획이며 eFuse/NVS encryption·Secure Boot·flash encryption·앱 서명·OTA·터널·
+원격 bug report가 모두 꺼져 있음을 검사했다. **이 이미지는 업로드 승인 대상이나
+연결 완료 이미지가 아니다.** 사용자 로컬 토큰·TTS 설정 후 재빌드하면 hash가
+바뀌므로 다시 검사하고 그 정확한 이미지의 승인을 받아야 한다.
+
+원본 16MiB 백업과 전체 app0 복구 slice를 로컬 0600으로 보존했다. 복구 쓰기는
+시험하지 않았다. 원본 bootloader와 새 앱의 실제 호환성·실물 LCD/터치·마이크·
+스피커·Muse 계정·페어링·Wi-Fi·LAN 통신은 미검증이다. 새 firmware write는 없다.
+이하 기록은 이전 얼굴·mock 개발 시점의 검사 결과다.
+
 ## 2026-10-05 여섯 파생 표정 추가
 
 공식 기본 얼굴을 유지한 기쁨·궁금함·생각 중·놀람·졸림·시무룩함을 추가했다.

@@ -6,6 +6,19 @@ ES8311 출력 코덱, NS4150B 앰프, QMI8658 IMU 구성은
 [공식 제품 문서](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54)에서 확인했다.
 터치 드라이버는 공식 예제와 같은 Espressif `esp_lcd_touch_cst816s`를 사용한다.
 
+## 현재 Muse 포트
+
+2026-10-05 승인된 새 경로는 [Muse + Mac 로컬 TTS](muse-connection.md)다.
+분리한 IDF 6.0.1에서 ESP32-S3 cross build와 이미지·partition 검사가 통과했다.
+기존 LCD·기본 얼굴·6표정 코드를 그대로 사용하며 PLUS GPIO4는 PTT·페어링,
+터치는 표정 순환에 쓴다. 공통 I2C와 ES7210 TDM RX·ES8311 STD TX를 구현했고,
+PA GPIO7은 오류에서 끈다. 볼륨은 20% 이하·16kHz 반이중이다. BOOT GPIO0와
+PWR GPIO5는 앱이 조작하지 않는다. 실제 LCD·touch·codec·Wi-Fi는 미검증이다.
+
+원본 16MiB flash 백업을 로컬 0600으로 보존했다. 새 앱은 기존 app0에 들어가며
+bootloader·table·otadata를 쓰지 않는 계획이다. 새 펌웨어 업로드는 수행하지 않았다.
+아래 버전·구현 설명은 기존 `firmware/main/` 데모 기준이며 Muse 포트와 구분한다.
+
 ## 고정한 공식 소스
 
 공식 저장소는 [waveshareteam/ESP32-S3-Touch-LCD-1.54](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.54)다.
@@ -76,20 +89,17 @@ ES7210과 ES8311의 I2S 설정은 동일하지 않다. 공식 factory는 출력�
 capture/playback와 기존 dot transport는 모두 명시적으로 `UNAVAILABLE`을 반환한다.
 호스트의 16kHz mono PCM16 WAV는 transport 데이터 계약이며 물리 codec 검증을 뜻하지 않는다.
 
-## 검증과 다음 단계
+## 기존 데모 검증 기록
 
 `sh firmware/tests/run_host_tests.sh`는 순수 C 상태·렌더링·서비스 경계 테스트를
 실행한다. 이 결과는 ESP-IDF cross build, LCD 전송, 실제 터치, 마이크, 스피커,
 AEC, Wi-Fi 또는 같은 dot 통화의 검증을 대신하지 않는다.
 
-개발 호스트에서 ESP-IDF, ESP32-S3 GCC, CMake, Ninja는 발견되지 않았다.
-현재 단계에서는 SDK 설치·component 설치·기기 플래시를 실행하지 않았다.
-추가 실행이 필요하면 Espressif의
-[ESP-IDF 5.5.1 macOS 설치 안내](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/macos-setup.html)에
-따라 별도 SDK 위치와 ESP32-S3 toolchain 설치 범위를 먼저 정한 뒤 진행한다.
+최초 데모 단계에는 SDK가 없었으며, 이후 승인 범위에서 분리된 IDF 5.5.1 데모와
+IDF 6.0.1 Muse 포트의 toolchain을 준비하고 cross build를 완료했다. SDK·component·
+바이너리는 저장소에 넣지 않았다. 기기 flash는 실행하지 않았다.
 빌드 명령은 [firmware/README.md](../firmware/README.md)에 기록했다.
 
-Nemossi의 firmware 소스와 primitive 얼굴은 새로 작성했다. 제삼자 구현 코드,
-이미지, 글꼴 또는 BSP를 복사하지 않았다. GPIO 상수와 공식 API의 설정값은 위
-출처를 참고했다. 참고 저장소의 Apache-2.0 라이선스와 Espressif component
-라이선스는 각 upstream에 유지되며, 향후 vendor 코드 도입 시 해당 notice를 함께 보존해야 한다.
+기존 데모의 firmware 소스와 primitive 얼굴은 자체 구현·공식 SimpleFace adaptation이다.
+Muse 포트는 고정한 공식 SDK를 별도로 생성하며 upstream license·header를 보존한다.
+Jollybot artwork는 복사하지 않는다. [제삼자 출처와 라이선스](../THIRD_PARTY_NOTICES.md).

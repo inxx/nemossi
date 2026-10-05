@@ -1,14 +1,18 @@
 # 네모씨 · nemossi
 
-**같은 dot과 통화하는 작은 단말**을 만드는 프로젝트입니다. 대상은 Waveshare
+**Muse와 대화하는 작은 단말**을 만드는 프로젝트입니다. 대상은 Waveshare
 ESP32-S3-Touch-LCD-1.54와 Mac mini입니다. 공식 Stack-chan 기본 SimpleFace의
 원형 눈·직사각형 입·검정 배경을 같은 비율로 그리고 대화 상태를 표시합니다.
 기본 얼굴을 유지한 [여섯 파생 표정](docs/expressions.md)을 화면 아래에서 선택할 수 있습니다.
 
-현재 결과는 **설치 없이 실행되는 Mac mini 연결 허브, 네모씨 시뮬레이터와
-ESP-IDF 펌웨어 골격**입니다. 스마트안경 없이 네모씨 화면·상태·통신을 개발합니다.
-실제 dot 통화의 외부 하드웨어 연결은 공식 경로가 아직 확인되지 않았습니다.
-데모 응답과 합성 확인음은 실제 dot·음성인식·TTS가 아닙니다.
+사용자가 2026-10-05 **Muse Gadgets + Mac 로컬 TTS** 방향 전환을 승인했습니다.
+기존 기본 얼굴과 여섯 표정을 유지한 1.54인치 보드 포팅이 있습니다. PLUS를 눌러
+음성 메모를 보내고 Muse의 텍스트 답을 Mac에서 합성해 스피커로 재생하는 구성입니다.
+기기 없는 ESP-IDF 6.0.1 빌드·모의 검사를 완료했으며, 실물·계정 연결은 아직
+미검증입니다. [Muse 연결·설정 절차](docs/muse-connection.md).
+
+아래 Mac mini 허브·브라우저 시뮬레이터는 기존 **로컬 mock 데모**입니다.
+데모 응답과 합성 확인음은 실제 Muse·dot·음성인식·TTS가 아닙니다.
 
 ## 바로 실행
 
@@ -69,7 +73,7 @@ python3 -m unittest discover -s tests -v
 ```text
 server/        Mac mini hub, 네모씨 device lifecycle, voice transport 경계
 web/           240×240 얼굴, 데모 조작, 선택적 마이크 입력
-firmware/      ESP-IDF 5.5 대상 보드 bring-up 골격과 순수 C 얼굴 모델
+firmware/      기존 IDF 5.5 데모, 순수 C 얼굴 및 muse-port/ IDF 6.0.1 포팅
 tests/         HTTP 및 오디오 프로토콜 검증
 scripts/       전체 검증과 명령줄 장치 시뮬레이터
 docs/          요구사항, 공식 핀맵, 연결 조사와 검증 범위
@@ -78,19 +82,18 @@ docs/          요구사항, 공식 핀맵, 연결 조사와 검증 범위
 ## 실물 보드로 진행할 때
 
 [공식 핀맵과 빌드 준비](docs/hardware.md), [펌웨어 안내](firmware/README.md)를 확인합니다.
-ESP-IDF 설치·보드 flash·serial monitor는 현재 수행하지 않았습니다.
+ESP-IDF 5.5.1·6.0.1 환경의 기기 없는 빌드를 확인했으며 보드 flash는 수행하지 않았습니다.
 Wi-Fi 비밀번호와 장치 토큰을 커밋하거나 코드에 하드코딩하지 않습니다.
 `sdkconfig` 등 로컬 설정과 빌드 산출물은 Git에서 제외됩니다.
 
-## dot 통화 연결
+## 이전 dot 통화 조사
 
-목표와 [공식 연결 조사](docs/dot-connection.md)를 유지합니다. 현재 `mock` adapter는
+이전 [공식 연결 조사](docs/dot-connection.md)를 유지합니다. 현재 `mock` adapter는
 장치 흐름 검증용입니다. 새로운 LLM이나 Realtime API 세션을 기존 dot으로 표시하지 않습니다.
 공식 연결을 확인한 뒤 `TransportAdapter` 구현을 추가합니다.
 
-일반 USB 오디오 장치로 기존 dot 통화를 사용하는 경로도 개발 후보입니다.
-USB를 최종 또는 유일한 연결 방식으로 확정하지 않았으며, 이 보드의 실제 장치
-인식·오디오·통화는 미검증입니다.
+USB UAC 실험은 `feat/usb-uac-dot`의 `2095601`에 보존했습니다. 현재 실물 개발
+목표는 위 Muse+TTS이며 실제 같은 dot 통화가 연결됐다고 표시하지 않습니다.
 
 스마트안경은 별도 프로젝트입니다. Mac mini를 공통 연결 지점으로 두되 폰 등
 외부 릴레이를 거칠 수 있으며, 안경의 Mac 직접 연결을 가정하지 않습니다. 이번

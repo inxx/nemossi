@@ -1,5 +1,23 @@
 # Stack-chan face attribution
 
+## Muse Gadgets SDK port
+
+The port stages the separately downloaded Meta Platforms Muse Gadgets SDK at
+commit `3229892e93c18a768ace42cbe1fe7133f91ca203` under Apache-2.0. Upstream LICENSE
+and source headers remain in the generated local tree. The license is reproduced
+in [licenses/Muse-Gadgets-Apache-2.0.txt](licenses/Muse-Gadgets-Apache-2.0.txt).
+This repository contains
+authored board/TTS adapters and explicit patch scripts. Modifications add bounded
+PCM TTS, cancellation/OOM guards and the existing face. Security activation, OTA,
+tunnel and bug report uploads are disabled for this port.
+
+Upstream minimp3 retains CC0-1.0 and pixel_font.c retains BSD-2-Clause. Jollybot
+artwork is excluded from the staged port. The Stack-chan notices below still apply.
+macOS speech uses installed OS voices; Apple voice data is not distributed here.
+Registry components keep their licenses in ignored local build directories.
+
+Source and license: https://github.com/facebookincubator/muse-gadget-sdk/tree/3229892e93c18a768ace42cbe1fe7133f91ca203
+
 Stack-chan is developed and published by **meganetaaan** (Shinya Ishikawa)
 and the Stack-chan community: <https://github.com/stack-chan/stack-chan>.
 

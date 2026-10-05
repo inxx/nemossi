@@ -2,7 +2,9 @@
 
 Waveshare ESP32-S3-Touch-LCD-1.54용 ESP-IDF **5.5.x** bring-up 골격이다.
 핀과 근거 commit은 [hardware.md](../docs/hardware.md)에 기록했다.
-SDK 설치나 플래시는 수행하지 않았으며 ESP-IDF cross build와 실물 동작은 미검증이다.
+기본 데모의 ESP-IDF 5.5.1 빌드는 확인했다. 사용자 승인으로 추가한
+`muse-port/`는 별도 ESP-IDF **6.0.1**에서 빌드한다. 두 빌드는 실제 보드에
+업로드하지 않았다. [Muse 포팅 안내](../docs/muse-connection.md).
 
 ## 현재 동작
 
@@ -38,7 +40,8 @@ capture count 0을 검사한다. 호스트 테스트 통과는 보드용 빌드 
 
 권장 SDK는 **5.5.1**이다. 설치 범위는 ESP-IDF, ESP32-S3 cross compiler, SDK
 Python 환경, CMake/Ninja 및 manifest의 Espressif components다. 설치 위치와
-다운로드 범위를 결정한 뒤 공식 설치 절차를 실행해야 하며, 현재는 제안만 기록한다.
+다운로드 범위를 결정한 뒤 공식 설치 절차를 실행한다. 이 개발 환경에서는
+5.5.1 데모와 별도 6.0.1 Muse 포팅 빌드를 확인했다.
 
 SDK의 `export.sh`로 활성화한 shell에서 다음을 실행한다.
 
@@ -51,7 +54,7 @@ idf.py build
 ```
 
 최초 configure/build는 `main/idf_component.yml`에 지정한 components를
-다운로드할 수 있다. 이 절차는 아직 실행하지 않았다. 플래시와 monitor는 연결된
+다운로드할 수 있다. 플래시와 monitor는 연결된
 보드, 포트, 범위를 확인한 뒤 별도로 진행한다. 기본 console은 native USB Serial/JTAG다.
 
 LCD는 공식 factory 설정인 SPI2 40MHz, mode 3, RGB565, inversion을 사용한다.

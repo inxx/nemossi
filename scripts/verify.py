@@ -28,7 +28,9 @@ def main():
     for path in sorted((ROOT / "web").glob("*.js")):
         run("JavaScript syntax: {}".format(path.name), ["node", "--check", str(path)])
     run("Firmware model on host", ["sh", "firmware/tests/run_host_tests.sh"])
-    print("\nLocal checks passed. ESP-IDF cross build, hardware, and actual dot calls remain unverified.")
+    run("Muse TTS and playback on host", [sys.executable, "-B", "-m", "unittest", "discover", "-s", "firmware/tests", "-p", "test_*.py", "-v"])
+    run("Muse board audio on host", ["sh", "firmware/muse-port/tests/run_audio_host_tests.sh"])
+    print("\nLocal checks passed. This command does not verify ESP-IDF builds, physical hardware or live Muse/dot connections.")
 
 
 if __name__ == "__main__":
