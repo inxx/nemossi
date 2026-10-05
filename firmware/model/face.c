@@ -1,22 +1,28 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Geometry, eyelid masks, mouth and easing adapted from Stack-chan SimpleFace
+ * by meganetaaan, commit 2f6b5a65e30278fdbd1c5114cab6d42cdb7b7a0d.
+ * Modified for Nemossi: RGB565 projection, bounded seeded motion, safety model.
+ */
 #include "face.h"
 
 #include <limits.h>
+#include <math.h>
 #include <string.h>
 
 enum {
-    COLOR_BACKGROUND = 0x0842,
-    COLOR_FACE = 0x9FFF,
-    COLOR_LISTENING = 0x07FF,
-    COLOR_THINKING = 0xBCDF,
-    COLOR_ERROR = 0xF986,
-    COLOR_BLOCKED = 0xFDC0,
-    COLOR_TEXT = 0x94B2
+    COLOR_BACKGROUND = 0x0000,
+    COLOR_FACE = 0xFFFF
 };
 
 static bool model_valid(const face_model_t *model)
 {
     return model != NULL && (unsigned)model->state < FACE_STATE_COUNT &&
            model->mouth_level <= FACE_MOUTH_LEVEL_MAX &&
+           model->eye_open_step <= STACKCHAN_EYE_OPEN_STEPS &&
+           model->breath_offset >= -(int)STACKCHAN_BREATH_AMPLITUDE &&
+           model->breath_offset <= (int)STACKCHAN_BREATH_AMPLITUDE &&
+           isfinite(model->gaze_x) && fabs(model->gaze_x) <= 2.0 &&
+           isfinite(model->gaze_y) && fabs(model->gaze_y) <= 2.0 &&
            model->state_since_ms <= model->last_tick_ms &&
            model->last_input_ms <= model->last_tick_ms &&
            model->last_mouth_ms <= model->last_tick_ms &&
@@ -53,7 +59,7 @@ static unsigned triangle(uint64_t elapsed_ms, unsigned period_ms,
 
 void face_model_init(face_model_t *model, bool demo_mode, uint64_t now_ms)
 {
-    face_model_init_seeded(model, demo_mode, now_ms, UINT32_C(0x4E454D4F));
+    face_model_init_seeded(model, demo_mode, now_ms, STACKCHAN_ANIMATION_SEED);
 }
 
 void face_model_init_seeded(face_model_t *model, bool demo_mode, uint64_t now_ms,
@@ -72,26 +78,96 @@ void face_model_init_seeded(face_model_t *model, bool demo_mode, uint64_t now_ms
     model->last_tick_ms = now_ms;
     model->blink_anchor_ms = now_ms;
     model->demo_since_ms = now_ms;
+    model->eye_open_step = STACKCHAN_EYE_OPEN_STEPS;
+}
+
+static uint32_t hash32(uint32_t value)
+{
+    value ^= value >> 16;
+    value *= UINT32_C(0x7FEB352D);
+    value ^= value >> 15;
+    value *= UINT32_C(0x846CA68B);
+    return value ^ (value >> 16);
+}
+
+static double uniform(uint32_t seed, unsigned slot, unsigned lane)
+{
+    return hash32(seed ^ ((slot + 1u) * UINT32_C(0x9E3779B9)) ^
+                  ((lane + 1u) * UINT32_C(0x85EBCA6B))) / 4294967296.0;
+}
+
+static unsigned duration(uint32_t seed, unsigned slot, unsigned lane,
+                         unsigned minimum, unsigned maximum)
+{
+    return minimum + (unsigned)floor(uniform(seed, slot, lane) * (maximum - minimum));
+}
+
+static double normal(uint32_t seed, unsigned slot, unsigned lane)
+{
+    const double a = 1.0 - uniform(seed, slot, lane);
+    const double b = 1.0 - uniform(seed, slot, lane + 1u);
+    const double angle = 6.28318530717958647692 * b;
+    const double unit = uniform(seed, slot, lane + 2u) < 0.5 ? sin(angle) : cos(angle);
+    return sqrt(-2.0 * log(a)) * unit * STACKCHAN_GAZE_GAIN_MILLI / 1000.0;
+}
+
+face_motion_t face_motion_sample(uint32_t seed, uint64_t elapsed_ms)
+{
+    face_motion_t sample = {0};
+    unsigned opens[STACKCHAN_ANIMATION_SLOTS];
+    unsigned closes[STACKCHAN_ANIMATION_SLOTS];
+    unsigned gazes[STACKCHAN_ANIMATION_SLOTS];
+    const uint64_t time = elapsed_ms - elapsed_ms % STACKCHAN_MOTION_TICK_MS;
+    for (unsigned slot = 0; slot < STACKCHAN_ANIMATION_SLOTS; ++slot) {
+        opens[slot] = duration(seed, slot, 0, STACKCHAN_BLINK_OPEN_MIN_MS, STACKCHAN_BLINK_OPEN_MAX_MS);
+        closes[slot] = duration(seed, slot, 1, STACKCHAN_BLINK_TRANSITION_MIN_MS, STACKCHAN_BLINK_TRANSITION_MAX_MS);
+        gazes[slot] = duration(seed, slot, 2, STACKCHAN_GAZE_INTERVAL_MIN_MS, STACKCHAN_GAZE_INTERVAL_MAX_MS);
+        sample.blink_cycle_ms += opens[slot] + closes[slot];
+        sample.gaze_cycle_ms += gazes[slot];
+    }
+    uint64_t phase = time % sample.blink_cycle_ms;
+    while (sample.blink_slot + 1u < STACKCHAN_ANIMATION_SLOTS &&
+           phase >= opens[sample.blink_slot] + closes[sample.blink_slot]) {
+        phase -= opens[sample.blink_slot] + closes[sample.blink_slot];
+        ++sample.blink_slot;
+    }
+    sample.blink_open_ms = opens[sample.blink_slot];
+    sample.blink_transition_ms = closes[sample.blink_slot];
+    sample.eye_open = 1.0;
+    if (phase >= sample.blink_open_ms) {
+        const double fraction = (double)(phase - sample.blink_open_ms) / sample.blink_transition_ms;
+        const double ease = fraction < 0.25 ? 1.0 - fraction * 4.0 :
+            (fraction - 0.25) * (fraction - 0.25) * 16.0 / 9.0;
+        const double minimum = STACKCHAN_BLINK_MIN_OPEN_MILLI / 1000.0;
+        sample.eye_open = minimum + ease * (1.0 - minimum);
+    }
+    sample.eye_open_step = (uint8_t)floor(sample.eye_open * STACKCHAN_EYE_OPEN_STEPS + 0.5);
+    phase = time % sample.gaze_cycle_ms;
+    while (sample.gaze_slot + 1u < STACKCHAN_ANIMATION_SLOTS && phase >= gazes[sample.gaze_slot]) {
+        phase -= gazes[sample.gaze_slot];
+        ++sample.gaze_slot;
+    }
+    if (sample.gaze_slot != 0) {
+        sample.gaze_x = normal(seed, sample.gaze_slot, 3);
+        sample.gaze_y = normal(seed, sample.gaze_slot, 6);
+    }
+    const double angle = 6.28318530717958647692 * (double)(time % STACKCHAN_BREATH_PERIOD_MS) /
+        STACKCHAN_BREATH_PERIOD_MS;
+    const double breath = ceil(sin(angle) * STACKCHAN_BREATH_STEPS) / STACKCHAN_BREATH_STEPS;
+    sample.breath_offset = (int8_t)floor(breath * STACKCHAN_BREATH_AMPLITUDE + 0.5);
+    return sample;
 }
 
 static void animate(face_model_t *model, uint64_t now_ms)
 {
-    model->animation_ms = (uint32_t)((now_ms - model->state_since_ms) % 60000u);
     const uint64_t elapsed = now_ms - model->blink_anchor_ms;
-    const unsigned phase = (unsigned)(elapsed % FACE_BLINK_PERIOD_MS);
-    /* One seeded window per slot, computed directly for arbitrarily sparse
-     * ticks. The entire 140ms window fits within its slot. */
-    uint64_t hash = elapsed / FACE_BLINK_PERIOD_MS + model->blink_seed;
-    hash ^= hash >> 30;
-    hash *= UINT64_C(0xBF58476D1CE4E5B9);
-    hash ^= hash >> 27;
-    hash *= UINT64_C(0x94D049BB133111EB);
-    hash ^= hash >> 31;
-    const unsigned window_range = FACE_BLINK_PERIOD_MS -
-        FACE_BLINK_DURATION_MS - FACE_BLINK_EARLIEST_MS + 1u;
-    const unsigned start = FACE_BLINK_EARLIEST_MS + (unsigned)(hash % window_range);
-    model->blink_closed = model->state == FACE_STATE_SLEEP ||
-        (phase >= start && phase - start < FACE_BLINK_DURATION_MS);
+    model->animation_ms = (uint32_t)(elapsed % 60000u);
+    const face_motion_t motion = face_motion_sample(model->blink_seed, elapsed);
+    model->eye_open_step = model->state == FACE_STATE_SLEEP ? 0 : motion.eye_open_step;
+    model->blink_closed = model->eye_open_step <= 2;
+    model->breath_offset = motion.breath_offset;
+    model->gaze_x = motion.gaze_x;
+    model->gaze_y = motion.gaze_y;
 }
 
 bool face_model_tick(face_model_t *model, uint64_t now_ms)
@@ -101,6 +177,10 @@ bool face_model_tick(face_model_t *model, uint64_t now_ms)
     }
     const face_status_t previous = face_model_status(model);
     const uint32_t previous_animation = model->animation_ms;
+    const uint8_t previous_eye = model->eye_open_step;
+    const int8_t previous_breath = model->breath_offset;
+    const double previous_gaze_x = model->gaze_x;
+    const double previous_gaze_y = model->gaze_y;
     model->last_tick_ms = now_ms;
 
     if (model->demo_mode) {
@@ -136,7 +216,9 @@ bool face_model_tick(face_model_t *model, uint64_t now_ms)
            previous.input_stale != current.input_stale ||
            previous.blink_closed != current.blink_closed ||
            previous.mouth_level != current.mouth_level ||
-           previous_animation != model->animation_ms;
+           previous_animation != model->animation_ms ||
+           previous_eye != model->eye_open_step || previous_breath != model->breath_offset ||
+           previous_gaze_x != model->gaze_x || previous_gaze_y != model->gaze_y;
 }
 
 bool face_model_handle_event(face_model_t *model, face_event_t event,
@@ -250,35 +332,74 @@ static void rectangle(canvas_t *canvas, int left, int top, int right,
     }
 }
 
-static void ellipse(canvas_t *canvas, int cx, int cy, int rx, int ry,
-                    uint16_t color)
+static double projection_scale(void)
 {
-    const int64_t rx2 = (int64_t)rx * rx;
-    const int64_t ry2 = (int64_t)ry * ry;
-    for (int y = -ry; y <= ry; ++y) {
-        for (int x = -rx; x <= rx; ++x) {
-            if ((int64_t)x * x * ry2 + (int64_t)y * y * rx2 <= rx2 * ry2) {
-                pixel(canvas, cx + x, cy + y, color);
+    return (double)STACKCHAN_SCALE_NUMERATOR / STACKCHAN_SCALE_DENOMINATOR;
+}
+
+/* Rasterize canonical coordinates at pixel centers. Canvas can antialias the
+ * same shape's edge pixels; this RGB565 renderer uses binary coverage. */
+static int project_x(double x)
+{
+    return (int)ceil(STACKCHAN_OFFSET_X + projection_scale() * x - 0.5);
+}
+
+static int project_y(double y)
+{
+    return (int)ceil(STACKCHAN_OFFSET_Y + projection_scale() * y - 0.5);
+}
+
+static void draw_eye(canvas_t *canvas, const face_model_t *model,
+                     double cx, double cy, bool left)
+{
+    const double w = STACKCHAN_EYELID_WIDTH;
+    const double h = STACKCHAN_EYELID_HEIGHT;
+    const double viewport_x = cx - w / 2;
+    const double viewport_y = cy - h / 2 + model->breath_offset;
+    const double closed_h = h * (1.0 - (double)model->eye_open_step / STACKCHAN_EYE_OPEN_STEPS);
+    for (int y = project_y(viewport_y); y < project_y(viewport_y + h); ++y) {
+        for (int x = project_x(viewport_x); x < project_x(viewport_x + w); ++x) {
+            const double nx = (x + 0.5 - STACKCHAN_OFFSET_X) / projection_scale();
+            const double ny = (y + 0.5 - STACKCHAN_OFFSET_Y) / projection_scale();
+            const double lx = nx - viewport_x;
+            const double ly = ny - viewport_y;
+            const double dx = nx - cx - 2.0 * model->gaze_x;
+            const double dy = ny - cy - model->breath_offset - 2.0 * model->gaze_y;
+            if (lx < 0 || lx >= w || ly < 0 || ly >= h ||
+                dx * dx + dy * dy > STACKCHAN_EYE_RADIUS * STACKCHAN_EYE_RADIUS) continue;
+            double mask_height = closed_h;
+            if (model->state == FACE_STATE_ERROR) {
+                /* SAD is upstream's slanted top eyelid, not a custom eye. */
+                const double half = (h + closed_h) / 2;
+                const double h1 = left ? half : closed_h;
+                const double h2 = left ? closed_h : half;
+                mask_height = h1 + (h2 - h1) * lx / w;
+            } else if (model->state == FACE_STATE_SLEEP) {
+                mask_height = h * 0.5 + closed_h * 0.5;
+            } else if (model->state == FACE_STATE_HAPPY) {
+                mask_height = closed_h * 0.6;
+                if (ly >= h * 0.6) continue;
             }
+            if (ly >= mask_height) pixel(canvas, x, y, COLOR_FACE);
         }
     }
 }
 
-static void line(canvas_t *canvas, int x0, int y0, int x1, int y1,
-                 uint16_t color)
+static void draw_mouth(canvas_t *canvas, const face_model_t *model)
 {
-    const int dx = x1 >= x0 ? x1 - x0 : x0 - x1;
-    const int dy = y1 >= y0 ? y0 - y1 : y1 - y0;
-    const int sx = x0 < x1 ? 1 : -1;
-    const int sy = y0 < y1 ? 1 : -1;
-    int error = dx + dy;
-    for (;;) {
-        rectangle(canvas, x0 - 1, y0 - 1, x0 + 2, y0 + 2, color);
-        if (x0 == x1 && y0 == y1) break;
-        const int twice_error = 2 * error;
-        if (twice_error >= dy) { error += dy; x0 += sx; }
-        if (twice_error <= dx) { error += dx; y0 += sy; }
-    }
+    const double open = model->state == FACE_STATE_SPEAKING
+        ? (double)model->mouth_level / FACE_MOUTH_LEVEL_MAX : 0.0;
+    const double width = STACKCHAN_MOUTH_MIN_WIDTH +
+        (STACKCHAN_MOUTH_MAX_WIDTH - STACKCHAN_MOUTH_MIN_WIDTH) * (1.0 - open);
+    const double height = STACKCHAN_MOUTH_MIN_HEIGHT +
+        (STACKCHAN_MOUTH_MAX_HEIGHT - STACKCHAN_MOUTH_MIN_HEIGHT) * open;
+    /* Upstream Port rounds its positive local x/y/w/h before projection. */
+    const double x = STACKCHAN_MOUTH_X - STACKCHAN_MOUTH_MAX_WIDTH / 2.0 +
+        floor((STACKCHAN_MOUTH_MAX_WIDTH - width) / 2.0 + 0.5);
+    const double y = STACKCHAN_MOUTH_Y - STACKCHAN_MOUTH_MAX_HEIGHT / 2.0 +
+        floor((STACKCHAN_MOUTH_MAX_HEIGHT - height) / 2.0 + 0.5) + model->breath_offset;
+    rectangle(canvas, project_x(x), project_y(y),
+              project_x(x + floor(width + 0.5)), project_y(y + floor(height + 0.5)), COLOR_FACE);
 }
 
 /* 5x7 uppercase glyphs, stored as top-to-bottom column bitmaps. */
@@ -337,78 +458,17 @@ bool face_render_rgb565(const face_model_t *model, uint16_t *pixels,
     const size_t area = width * height;
     for (size_t i = 0; i < area; ++i) pixels[i] = COLOR_BACKGROUND;
     canvas_t canvas = { pixels, (int)width, (int)height };
-    uint16_t color = COLOR_FACE;
-    if (model->state == FACE_STATE_LISTENING) color = COLOR_LISTENING;
-    if (model->state == FACE_STATE_THINKING) color = COLOR_THINKING;
-    if (model->state == FACE_STATE_ERROR) color = COLOR_ERROR;
-    if (model->state == FACE_STATE_BLOCKED) color = COLOR_BLOCKED;
-    const int bob = model->state == FACE_STATE_IDLE
-        ? (int)triangle(model->animation_ms, 2400u, 4u) - 2 : 0;
-    int gaze = 0;
-    if (model->state == FACE_STATE_THINKING || model->state == FACE_STATE_CONFUSED) {
-        gaze = (int)triangle(model->animation_ms, 1800u, 8u) - 4;
-    } else if (model->state != FACE_STATE_ERROR &&
-               model->state != FACE_STATE_BLOCKED && model->state != FACE_STATE_SLEEP) {
-        gaze = (int)triangle(model->animation_ms, 2800u, 4u) - 2;
-    }
-    const int ry = model->state == FACE_STATE_LISTENING ? 35 : 30;
-    for (unsigned eye = 0; eye < 2; ++eye) {
-        const int cx = (eye == 0 ? 75 : 165) + gaze;
-        const int cy = 96 + bob;
-        if (model->state == FACE_STATE_ERROR) {
-            line(&canvas, cx - 16, cy - 18, cx + 16, cy + 18, color);
-            line(&canvas, cx + 16, cy - 18, cx - 16, cy + 18, color);
-        } else if (model->state == FACE_STATE_BLOCKED) {
-            rectangle(&canvas, cx - 25, cy - 5, cx + 26, cy + 6, color);
-        } else if (model->blink_closed) {
-            rectangle(&canvas, cx - 24, cy - 2, cx + 25, cy + 3, color);
-        } else if (model->state == FACE_STATE_HAPPY) {
-            line(&canvas, cx - 20, cy + 6, cx, cy - 10, color);
-            line(&canvas, cx, cy - 10, cx + 20, cy + 6, color);
-        } else {
-            const int eye_height = model->state == FACE_STATE_CONFUSED
-                ? (eye == 0 ? 23 : 34) : ry;
-            ellipse(&canvas, cx, cy, 24, eye_height, color);
-            ellipse(&canvas, cx - 7, cy - 12, 4, 6, 0xFFFF);
-        }
-    }
-    if (model->state == FACE_STATE_SPEAKING) {
-        const int mouth_height = 3 + model->mouth_level * 20 / FACE_MOUTH_LEVEL_MAX;
-        ellipse(&canvas, 120, 169, 23, mouth_height, color);
-        if (mouth_height > 5) {
-            ellipse(&canvas, 120, 168, 18, mouth_height - 4, COLOR_BACKGROUND);
-        }
-    } else if (model->state == FACE_STATE_LISTENING) {
-        ellipse(&canvas, 120, 169, 10, 13, color);
-        ellipse(&canvas, 120, 169, 6, 9, COLOR_BACKGROUND);
-    } else if (model->state == FACE_STATE_THINKING ||
-               model->state == FACE_STATE_BLOCKED || model->state == FACE_STATE_SLEEP) {
-        rectangle(&canvas, 103, 168, 138, 172, color);
-    } else if (model->state == FACE_STATE_HAPPY) {
-        ellipse(&canvas, 120, 163, 27, 20, color);
-        rectangle(&canvas, 92, 140, 149, 162, COLOR_BACKGROUND);
-    } else if (model->state == FACE_STATE_CONFUSED) {
-        line(&canvas, 101, 174, 139, 163, color);
-    } else if (model->state == FACE_STATE_ERROR) {
-        line(&canvas, 99, 175, 110, 166, color);
-        line(&canvas, 110, 166, 121, 175, color);
-        line(&canvas, 121, 175, 132, 166, color);
-        line(&canvas, 132, 166, 143, 175, color);
-    } else {
-        const int xs[] = { 96, 108, 120, 132, 144 };
-        const int ys[] = { 164, 170, 172, 170, 164 };
-        for (unsigned i = 0; i < 4; ++i) {
-            line(&canvas, xs[i], ys[i] + bob, xs[i + 1], ys[i + 1] + bob, color);
-        }
-    }
+    draw_eye(&canvas, model, STACKCHAN_LEFT_EYE_X, STACKCHAN_LEFT_EYE_Y, true);
+    draw_eye(&canvas, model, STACKCHAN_RIGHT_EYE_X, STACKCHAN_RIGHT_EYE_Y, false);
+    draw_mouth(&canvas, model);
     static const char *const labels[] = {
         "IDLE", "LISTEN", "THINK", "SPEAK", "ERROR", "BLOCKED",
         "HAPPY", "CONFUSED", "SLEEP"
     };
     text_centered(&canvas, model->input_stale ? "STALE" : labels[model->state],
-                  213, 1, COLOR_TEXT);
+                  213, 1, COLOR_FACE);
     if (model->demo_mode) {
-        text_centered(&canvas, "DEMO", 17, 2, COLOR_BLOCKED);
+        text_centered(&canvas, "DEMO", 9, 2, COLOR_FACE);
     }
     return true;
 }

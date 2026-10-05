@@ -1,0 +1,24 @@
+# Stack-chan face attribution
+
+Stack-chan is developed and published by **meganetaaan** (Shinya Ishikawa)
+and the Stack-chan community: <https://github.com/stack-chan/stack-chan>.
+
+Nemossi adapts the official default SimpleFace geometry, eyelid masks and motion
+formulas from commit `2f6b5a65e30278fdbd1c5114cab6d42cdb7b7a0d`.
+The affected renderer files identify the source and their modifications.
+The original Apache License 2.0 is reproduced in
+[licenses/Stack-chan-Apache-2.0.txt](licenses/Stack-chan-Apache-2.0.txt).
+The rest of Nemossi's device, hub and voice code is unchanged by this adaptation.
+
+Changes include a uniform 3/4 projection of the original 320×240 layout into the
+240×240 screen, a centered vertical offset, native browser/C primitive rendering,
+and bounded seeded motion scheduling for deterministic cross-renderer checks.
+The existing normalized audio-level input controls mouth openness. No original
+Stack-chan firmware or device drivers are installed or executed.
+
+The visual comparison credits the official README photograph to Stack-chan /
+meganetaaan and links the same repository. The photograph depicts the earlier
+three-button M5Stack. Current numeric geometry comes from the pinned SimpleFace
+source. Reference pictures are kept as comparison artifacts, not app assets.
+See the upstream [character guidelines](https://github.com/stack-chan/stack-chan/blob/2f6b5a65e30278fdbd1c5114cab6d42cdb7b7a0d/GUIDELINE.md)
+and [license](https://github.com/stack-chan/stack-chan/blob/2f6b5a65e30278fdbd1c5114cab6d42cdb7b7a0d/LICENSE).

@@ -12,7 +12,7 @@ fi
 "$compiler" -std=c11 -Wall -Wextra -Werror -pedantic \
     -fsanitize=address,undefined -fno-omit-frame-pointer -g \
     -I"$script_dir/../model" \
-    "$script_dir/../model/face.c" "$script_dir/test_face.c" \
+    "$script_dir/../model/face.c" "$script_dir/test_face.c" -lm \
     -o "$temp_dir/test_face"
 "$temp_dir/test_face"
 

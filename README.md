@@ -1,8 +1,8 @@
 # 네모씨 · nemossi
 
 **같은 dot과 통화하는 작은 단말**을 만드는 프로젝트입니다. 대상은 Waveshare
-ESP32-S3-Touch-LCD-1.54와 Mac mini입니다. Stack-chan 스타일의 얼굴을 단순한
-도형으로 그리고, 말하기·듣기·생각하기·재생 상태를 표시합니다.
+ESP32-S3-Touch-LCD-1.54와 Mac mini입니다. 공식 Stack-chan 기본 SimpleFace의
+원형 눈·직사각형 입·검정 배경을 같은 비율로 그리고 대화 상태를 표시합니다.
 
 현재 결과는 **설치 없이 실행되는 Mac mini 연결 허브, 네모씨 시뮬레이터와
 ESP-IDF 펌웨어 골격**입니다. 스마트안경 없이 네모씨 화면·상태·통신을 개발합니다.
@@ -99,4 +99,4 @@ USB를 최종 또는 유일한 연결 방식으로 확정하지 않았으며, �
 - [연결 구조](docs/architecture.md)
 - [장치 프로토콜](docs/protocol.md)
 - [공식 Waveshare 자료](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54)
-- [Stack-chan](https://github.com/stack-chan/stack-chan): 얼굴 표현 참고. 기존 이미지·에셋을 복사하지 않았습니다.
+- [Stack-chan](https://github.com/stack-chan/stack-chan): meganetaaan과 커뮤니티가 개발·공개했습니다. 기본 얼굴의 좌표·모션을 Apache 2.0 조건으로 적용했습니다. [대조 기록](docs/face-reference.md), [저작권·라이선스](THIRD_PARTY_NOTICES.md).

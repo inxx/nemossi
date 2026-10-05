@@ -1,4 +1,26 @@
-/** Original primitive face rendering. No image or third-party face assets. */
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * Adapted from Stack-chan by meganetaaan, https://github.com/stack-chan/stack-chan
+ * Source commit: 2f6b5a65e30278fdbd1c5114cab6d42cdb7b7a0d
+ * Modified: Canvas projection, Nemossi state mapping and bounded seeded motion.
+ * SimpleFace, Eye, Mouth, blink and breath retain the upstream shape equations.
+ * Upstream random intervals are replaced by a repeating 32-slot seeded schedule.
+ */
+export const STACKCHAN_DESIGN = Object.freeze({
+  source_commit: "2f6b5a65e30278fdbd1c5114cab6d42cdb7b7a0d",
+  source_width: 320, source_height: 240, target_width: 240, target_height: 240,
+  scale_numerator: 3, scale_denominator: 4, offset_x: 0, offset_y: 30,
+  left_eye_x: 90, left_eye_y: 93, right_eye_x: 230, right_eye_y: 96,
+  eye_radius: 8, eyelid_width: 24, eyelid_height: 24, eye_open_steps: 12,
+  mouth_x: 160, mouth_y: 148, mouth_min_width: 50, mouth_max_width: 90,
+  mouth_min_height: 8, mouth_max_height: 58, background_rgb: 0, foreground_rgb: 16777215,
+  blink_open_min_ms: 400, blink_open_max_ms: 5000,
+  blink_transition_min_ms: 200, blink_transition_max_ms: 400, blink_min_open_milli: 200,
+  breath_period_ms: 6000, breath_amplitude: 6, breath_steps: 8, motion_tick_ms: 33,
+  gaze_interval_min_ms: 300, gaze_interval_max_ms: 2000, gaze_gain_milli: 200,
+  animation_seed: 1313164623, animation_slots: 32,
+});
+
 export const FACE_STATES = Object.freeze({
   idle: { label: "기다리는 중", subtitle: "안녕하세요. 네모씨예요." },
   listening: { label: "듣는 중", subtitle: "네, 듣고 있어요." },
@@ -10,6 +32,194 @@ export const FACE_STATES = Object.freeze({
   sleep: { label: "쉬는 중", subtitle: "잠깐 쉬고 있어요." },
 });
 
+const D = STACKCHAN_DESIGN;
+const SCALE = D.scale_numerator / D.scale_denominator;
+const clampUnit = value => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+const quantizeOpen = value => Math.round(clampUnit(value) * D.eye_open_steps);
+
+export function hash32(value) {
+  let x = value >>> 0;
+  x ^= x >>> 16;
+  x = Math.imul(x, 0x7feb352d);
+  x ^= x >>> 15;
+  x = Math.imul(x, 0x846ca68b);
+  return (x ^ (x >>> 16)) >>> 0;
+}
+
+function unitRandom(seed, slot, lane) {
+  return hash32(seed ^ Math.imul(slot + 1, 0x9e3779b9) ^ Math.imul(lane + 1, 0x85ebca6b)) / 4294967296;
+}
+
+function normalRandom(seed, slot, lane) {
+  const a = 1 - unitRandom(seed, slot, lane);
+  const b = 1 - unitRandom(seed, slot, lane + 1);
+  const angle = 2 * Math.PI * b;
+  const wave = unitRandom(seed, slot, lane + 2) < 0.5 ? Math.sin(angle) : Math.cos(angle);
+  return Math.sqrt(-2 * Math.log(a)) * wave * D.gaze_gain_milli / 1000;
+}
+
+function makeSchedule(seed) {
+  return Array.from({ length: D.animation_slots }, (_, slot) => {
+    const interval = (lane, min, max) => min + Math.floor(unitRandom(seed, slot, lane) * (max - min));
+    return Object.freeze({
+      open: interval(0, D.blink_open_min_ms, D.blink_open_max_ms),
+      transition: interval(1, D.blink_transition_min_ms, D.blink_transition_max_ms),
+      gazeInterval: interval(2, D.gaze_interval_min_ms, D.gaze_interval_max_ms),
+      gaze: Object.freeze(slot === 0 ? { x: 0, y: 0 } : {
+        x: normalRandom(seed, slot, 3), y: normalRandom(seed, slot, 6),
+      }),
+    });
+  });
+}
+
+const SCHEDULE = Object.freeze(makeSchedule(D.animation_seed));
+
+/** Upstream close for the first quarter, quadratic reopen for the rest. */
+export function blinkEase(fraction) {
+  const f = clampUnit(fraction);
+  return f < 0.25 ? 1 - f * 4 : (f - 0.25) ** 2 * 16 / 9;
+}
+
+/** Sample at most 32 slots, independent of frame cadence and state changes. */
+export function motionAt(elapsedMs, reducedMotion = false, seed = D.animation_seed) {
+  const elapsed = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0;
+  const timeMs = Math.floor(elapsed / D.motion_tick_ms) * D.motion_tick_ms;
+  const schedule = seed === D.animation_seed ? SCHEDULE : makeSchedule(seed >>> 0);
+  const blinkCycleMs = schedule.reduce((sum, slot) => sum + slot.open + slot.transition, 0);
+  const gazeCycleMs = schedule.reduce((sum, slot) => sum + slot.gazeInterval, 0);
+  let blinkTime = timeMs % blinkCycleMs, blinkSlot = 0;
+  let gazeTime = timeMs % gazeCycleMs, gazeSlot = 0;
+  while (blinkSlot < schedule.length - 1 && blinkTime >= schedule[blinkSlot].open + schedule[blinkSlot].transition) {
+    blinkTime -= schedule[blinkSlot].open + schedule[blinkSlot].transition;
+    blinkSlot++;
+  }
+  while (gazeSlot < schedule.length - 1 && gazeTime >= schedule[gazeSlot].gazeInterval) {
+    gazeTime -= schedule[gazeSlot].gazeInterval;
+    gazeSlot++;
+  }
+  const slot = schedule[blinkSlot];
+  const minOpen = D.blink_min_open_milli / 1000;
+  const eyeOpen = reducedMotion || blinkTime < slot.open ? 1 :
+    minOpen + blinkEase((blinkTime - slot.open) / slot.transition) * (1 - minOpen);
+  const breath = reducedMotion ? 0 : Math.round(Math.ceil(
+    Math.sin(2 * Math.PI * (timeMs % D.breath_period_ms) / D.breath_period_ms) * D.breath_steps,
+  ) / D.breath_steps * D.breath_amplitude);
+  return {
+    timeMs, eyeOpen, eyeOpenStep: quantizeOpen(eyeOpen), breath: breath || 0,
+    gaze: reducedMotion ? { x: 0, y: 0 } : { ...schedule[gazeSlot].gaze },
+    blinkSlot, gazeSlot, blinkOpenMs: slot.open, blinkTransitionMs: slot.transition,
+    blinkCycleMs, gazeCycleMs,
+  };
+}
+
+function projectRect(rect) {
+  return {
+    x: D.offset_x + rect.x * SCALE, y: D.offset_y + rect.y * SCALE,
+    width: rect.width * SCALE, height: rect.height * SCALE,
+  };
+}
+
+/** Native Port rounds local coordinates and dimensions before projection. */
+export function mouthGeometry(open, breath = 0) {
+  const value = clampUnit(open);
+  const width = D.mouth_min_width + (D.mouth_max_width - D.mouth_min_width) * (1 - value);
+  const height = D.mouth_min_height + (D.mouth_max_height - D.mouth_min_height) * value;
+  return {
+    x: D.mouth_x - D.mouth_max_width / 2 + Math.round((D.mouth_max_width - width) / 2),
+    y: D.mouth_y - D.mouth_max_height / 2 + Math.round((D.mouth_max_height - height) / 2) + breath,
+    width: Math.round(width), height: Math.round(height),
+  };
+}
+
+function eyeGeometry(cx, cy, side, emotion, step, gaze, breath) {
+  const width = D.eyelid_width, height = D.eyelid_height;
+  const x = cx - width / 2, y = cy - height / 2 + breath;
+  const closedHeight = height * (1 - step / D.eye_open_steps);
+  let masks;
+  if (emotion === "SAD") {
+    let leftHeight = (height + closedHeight) / 2, rightHeight = closedHeight;
+    if (side === "left") [leftHeight, rightHeight] = [rightHeight, leftHeight];
+    [leftHeight, rightHeight] = [rightHeight, leftHeight];
+    masks = [{ kind: "polygon", points: [[x, y], [x, y + leftHeight], [x + width, y + rightHeight], [x + width, y]] }];
+  } else if (emotion === "SLEEPY") {
+    masks = [{ kind: "rect", x, y, width, height: height * 0.5 + closedHeight * 0.5 }];
+  } else if (emotion === "HAPPY") {
+    masks = [
+      { kind: "rect", x, y, width, height: closedHeight * 0.6 },
+      { kind: "rect", x, y: y + height * 0.6, width, height: height * 0.4 },
+    ];
+  } else {
+    masks = [{ kind: "rect", x, y, width, height: closedHeight }];
+  }
+  return {
+    side, viewport: { x, y, width, height },
+    iris: { x: cx + gaze.x * 2, y: cy + breath + gaze.y * 2, radius: D.eye_radius }, masks,
+  };
+}
+
+export function faceGeometry(state = "idle", mouthLevel = 0, motion = motionAt(0, true)) {
+  const emotion = ({ happy: "HAPPY", error: "SAD", confused: "DOUBTFUL", sleep: "SLEEPY" })[state] || "NEUTRAL";
+  const eyeOpenStep = state === "sleep" ? 0 : quantizeOpen(motion.eyeOpen);
+  const native = {
+    eyes: [
+      eyeGeometry(D.left_eye_x, D.left_eye_y, "left", emotion, eyeOpenStep, motion.gaze, motion.breath),
+      eyeGeometry(D.right_eye_x, D.right_eye_y, "right", emotion, eyeOpenStep, motion.gaze, motion.breath),
+    ],
+    mouth: mouthGeometry(state === "speaking" ? mouthLevel : 0, motion.breath),
+  };
+  const projected = {
+    eyes: native.eyes.map(eye => ({
+      ...eye, viewport: projectRect(eye.viewport),
+      iris: { x: D.offset_x + eye.iris.x * SCALE, y: D.offset_y + eye.iris.y * SCALE, radius: eye.iris.radius * SCALE },
+      masks: eye.masks.map(mask => mask.kind === "rect" ? { kind: "rect", ...projectRect(mask) } : {
+        kind: "polygon", points: mask.points.map(([x, y]) => [D.offset_x + x * SCALE, D.offset_y + y * SCALE]),
+      }),
+    })),
+    mouth: projectRect(native.mouth),
+  };
+  return { emotion, eyeOpenStep, native, projected };
+}
+
+/** Render native geometry through the uniform 0.75 projection into 240x240. */
+export function drawStackchanFace(ctx, { state = "idle", mouthLevel = 0, brightness = 1, motion = motionAt(0, true) } = {}) {
+  const geometry = faceGeometry(state, mouthLevel, motion);
+  const level = Math.round(255 * Math.max(0.55, Math.min(1, Number.isFinite(brightness) ? brightness : 1)));
+  const foreground = `rgb(${level},${level},${level})`;
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, D.target_width, D.target_height);
+  ctx.save();
+  ctx.translate(D.offset_x, D.offset_y);
+  ctx.scale(SCALE, SCALE);
+  for (const eye of geometry.native.eyes) {
+    ctx.save();
+    ctx.beginPath();
+    const viewport = eye.viewport;
+    ctx.rect(viewport.x, viewport.y, viewport.width, viewport.height);
+    ctx.clip();
+    ctx.fillStyle = foreground;
+    ctx.beginPath();
+    ctx.arc(eye.iris.x, eye.iris.y, eye.iris.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#000000";
+    for (const mask of eye.masks) {
+      if (mask.kind === "rect") ctx.fillRect(mask.x, mask.y, mask.width, mask.height);
+      else {
+        ctx.beginPath();
+        ctx.moveTo(...mask.points[0]);
+        for (const point of mask.points.slice(1)) ctx.lineTo(...point);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+  ctx.fillStyle = foreground;
+  const mouth = geometry.native.mouth;
+  ctx.fillRect(mouth.x, mouth.y, mouth.width, mouth.height);
+  ctx.restore();
+  return geometry;
+}
+
 export class Face {
   constructor(canvas) {
     this.canvas = canvas;
@@ -18,87 +228,48 @@ export class Face {
     this.brightness = 1;
     this.mouthLevel = 0;
     this.motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    this.nextBlink = performance.now() + 2300;
-    this.blinkStart = -1000;
-    this.nextGaze = 0;
-    this.gaze = { x: 0, y: 0 };
-    this.targetGaze = { x: 0, y: 0 };
+    this.motionOrigin = performance.now();
     this.running = true;
+    this.dirty = true;
+    this.lastMotionTime = -1;
+    this.lastReduced = undefined;
+    this.draw(this.motionOrigin);
     this.frame = requestAnimationFrame(time => this.tick(time));
   }
 
   setState(state) {
     if (!FACE_STATES[state]) return;
     this.state = state;
+    this.dirty = true;
     this.canvas.setAttribute("aria-label", `네모씨: ${FACE_STATES[state].label}`);
   }
 
   setBrightness(value) {
-    this.brightness = Math.max(0.55, Math.min(1, value));
+    this.brightness = Math.max(0.55, Math.min(1, Number.isFinite(value) ? value : 1));
+    this.dirty = true;
   }
 
   setMouthLevel(value) {
-    this.mouthLevel = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
-  }
-
-  rect(x, y, width, height, radius = 3, rotation = 0) {
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(rotation);
-    ctx.beginPath();
-    ctx.roundRect(-width / 2, -height / 2, width, height, Math.min(radius, height / 2, width / 2));
-    ctx.fill();
-    ctx.restore();
+    const next = clampUnit(value);
+    if (next !== this.mouthLevel) this.dirty = true;
+    this.mouthLevel = next;
   }
 
   tick(time) {
     if (!this.running) return;
     const reduced = this.motionQuery.matches;
-    if (time > this.nextGaze && !reduced) {
-      this.targetGaze = { x: Math.random() * 8 - 4, y: Math.random() * 4 - 2 };
-      this.nextGaze = time + 3000 + Math.random() * 3500;
-    }
-    if (time > this.nextBlink && !reduced) {
-      this.blinkStart = time;
-      this.nextBlink = time + 2800 + Math.random() * 3500;
-    }
-    const blinkAge = time - this.blinkStart;
-    const blink = !reduced && blinkAge >= 0 && blinkAge < 160 ? 1 - Math.sin(blinkAge / 160 * Math.PI) * 0.95 : 1;
-    const gazeX = this.state === "thinking" ? 8 : this.state === "sleep" || reduced ? 0 : this.targetGaze.x;
-    const gazeY = this.state === "thinking" ? -4 : this.state === "sleep" || reduced ? 0 : this.targetGaze.y;
-    this.gaze.x += (gazeX - this.gaze.x) * 0.035;
-    this.gaze.y += (gazeY - this.gaze.y) * 0.035;
-    this.draw(time, blink, reduced);
+    const motionTime = Math.floor(Math.max(0, time - this.motionOrigin) / D.motion_tick_ms) * D.motion_tick_ms;
+    if (this.dirty || (!reduced && motionTime !== this.lastMotionTime) || reduced !== this.lastReduced) this.draw(time);
     this.frame = requestAnimationFrame(next => this.tick(next));
   }
 
-  draw(time, blink, reduced) {
-    const ctx = this.ctx;
-    const level = Math.round(255 * this.brightness);
-    ctx.fillStyle = `rgb(${level},${level},${level})`;
-    ctx.fillRect(0, 0, 240, 240);
-    ctx.fillStyle = "#20211e";
-    const bob = reduced || this.state === "sleep" ? 0 : Math.sin(time / 1800) * 0.7;
-    const x = this.gaze.x;
-    const y = this.gaze.y + bob;
-    let leftHeight = 32, rightHeight = 32, eyeWidth = 17, tilt = 0;
-    if (this.state === "listening") leftHeight = rightHeight = 38;
-    if (this.state === "happy") { leftHeight = rightHeight = 8; eyeWidth = 27; tilt = -0.13; }
-    if (this.state === "confused") { leftHeight = 31; rightHeight = 17; tilt = -0.13; }
-    if (this.state === "error") { leftHeight = rightHeight = 7; eyeWidth = 24; tilt = 0.21; }
-    if (this.state === "sleep") { leftHeight = rightHeight = 4; eyeWidth = 25; }
-    this.rect(81 + x, 105 + y, eyeWidth, Math.max(2, leftHeight * blink), 4, tilt);
-    this.rect(159 + x, 105 + y, eyeWidth, Math.max(2, rightHeight * blink), 4, -tilt);
-    let mouthWidth = 27, mouthHeight = 6, mouthTilt = 0;
-    if (this.state === "listening") { mouthWidth = 10; mouthHeight = 10; }
-    if (this.state === "thinking") { mouthWidth = 20; mouthHeight = 5; mouthTilt = -0.12; }
-    if (this.state === "speaking") { mouthWidth = 25; mouthHeight = reduced ? 12 : 5 + this.mouthLevel * 24; }
-    if (this.state === "happy") { mouthWidth = 27; mouthHeight = 12; }
-    if (this.state === "confused") { mouthWidth = 20; mouthHeight = 5; mouthTilt = 0.13; }
-    if (this.state === "error") { mouthWidth = 19; mouthHeight = 4; }
-    if (this.state === "sleep") { mouthWidth = 9; mouthHeight = 4; }
-    this.rect(120 + x * 0.7, 151 + y, mouthWidth, mouthHeight, 3, mouthTilt);
+  draw(time) {
+    const reduced = this.motionQuery.matches;
+    const motion = motionAt(time - this.motionOrigin, reduced);
+    drawStackchanFace(this.ctx, { state: this.state, mouthLevel: this.mouthLevel, brightness: this.brightness, motion });
+    this.lastMotionTime = motion.timeMs;
+    this.lastReduced = reduced;
+    this.dirty = false;
   }
 
   destroy() {

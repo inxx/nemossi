@@ -1,22 +1,23 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Stack-chan SimpleFace adaptation; modified for Nemossi's bounded C model.
+ */
 #ifndef NEMOSSI_FACE_H
 #define NEMOSSI_FACE_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "face_design.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define FACE_WIDTH 240u
-#define FACE_HEIGHT 240u
+#define FACE_WIDTH STACKCHAN_TARGET_WIDTH
+#define FACE_HEIGHT STACKCHAN_TARGET_HEIGHT
 #define FACE_MOUTH_LEVEL_MAX 100
 #define FACE_INPUT_TIMEOUT_MS 5000u
 #define FACE_MOUTH_TIMEOUT_MS 750u
-#define FACE_BLINK_PERIOD_MS 4200u
-#define FACE_BLINK_DURATION_MS 140u
-#define FACE_BLINK_EARLIEST_MS 1800u
 #define FACE_DEMO_PERIOD_MS 12000u
 
 typedef enum {
@@ -59,6 +60,10 @@ typedef struct {
     bool input_stale; /* An active input state expired; not a network status. */
     bool blink_closed;
     uint8_t mouth_level;
+    uint8_t eye_open_step; /* Fixed iris, quantized upstream eyelid mask 0..12. */
+    int8_t breath_offset; /* Original 320x240 vertical pixels, -6..6. */
+    double gaze_x;
+    double gaze_y;
     uint32_t animation_ms;
     uint32_t blink_seed;
     uint64_t state_since_ms;
@@ -77,10 +82,27 @@ typedef struct {
     uint8_t mouth_level;
 } face_status_t;
 
+typedef struct {
+    double eye_open;
+    double gaze_x;
+    double gaze_y;
+    uint8_t eye_open_step;
+    int8_t breath_offset;
+    unsigned blink_slot;
+    unsigned gaze_slot;
+    unsigned blink_open_ms;
+    unsigned blink_transition_ms;
+    uint64_t blink_cycle_ms;
+    uint64_t gaze_cycle_ms;
+} face_motion_t;
+
+/* Bounded 32-slot sampling. Seeded intervals repeat; no elapsed-time replay.
+ * State changes never reset this independent monotonic motion clock. */
+face_motion_t face_motion_sample(uint32_t seed, uint64_t elapsed_ms);
+
 /* now_ms is a monotonic millisecond counter. No function sleeps or allocates. */
 void face_model_init(face_model_t *model, bool demo_mode, uint64_t now_ms);
-/* The seed changes randomized blink windows; tick cadence never changes them.
- * FACE_BLINK_PERIOD_MS defines a scheduling slot, not a fixed blink interval. */
+/* The seed changes bounded blink/gaze schedules; tick cadence never changes them. */
 void face_model_init_seeded(face_model_t *model, bool demo_mode, uint64_t now_ms,
                             uint32_t blink_seed);
 
