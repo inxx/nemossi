@@ -18,6 +18,73 @@ static const face_event_kind_t STATE_EVENTS[FACE_STATE_COUNT] = {
     FACE_EVENT_HAPPY, FACE_EVENT_CONFUSED, FACE_EVENT_SLEEP
 };
 
+typedef enum {
+    REF_AUTO, REF_HAPPY, REF_NEUTRAL, REF_SLEEPY, REF_SAD
+} reference_emotion_t;
+
+typedef struct {
+    const char *id;
+    reference_emotion_t emotion;
+    unsigned left_open_cap, right_open_cap;
+    int iris_dx, iris_dy;
+    unsigned mouth_rest_open_milli;
+    int mouth_width_delta, mouth_height_delta, mouth_dx, mouth_dy;
+} reference_expression_t;
+
+/* Independently transcribed from tests/fixtures/nemossi-expressions.json.
+ * The oracle never reads production FACE_EXPRESSION_DESIGNS. */
+static const reference_expression_t EXPRESSION_REFERENCES[7] = {
+    {"default",   REF_AUTO,    12,12, 0, 0,   0,  0,0, 0,0},
+    {"joy",       REF_HAPPY,   12,12, 0, 0,   0,  0,2, 0,0},
+    {"curious",   REF_NEUTRAL, 12, 9, 2,-1,   0,-12,2, 0,0},
+    {"pondering", REF_NEUTRAL,  8,10,-2,-2,   0,-18,0,-4,0},
+    {"surprised", REF_NEUTRAL, 12,12, 0,-1, 280,  0,0, 0,0},
+    {"drowsy",    REF_SLEEPY,  10,10, 0, 1,   0,-16,0, 0,1},
+    {"downcast",  REF_SAD,     10,10, 0, 1,   0,-12,0, 0,3},
+};
+
+typedef struct { double x, y, width, height; } reference_rect_t;
+
+static const reference_expression_t *reference_expression(const face_model_t *model)
+{
+    assert((unsigned)model->expression < 7);
+    return &EXPRESSION_REFERENCES[model->expression];
+}
+
+static reference_emotion_t reference_emotion(const face_model_t *model)
+{
+    const reference_emotion_t selected = reference_expression(model)->emotion;
+    if (selected != REF_AUTO) return selected;
+    if (model->state == FACE_STATE_ERROR) return REF_SAD;
+    if (model->state == FACE_STATE_HAPPY) return REF_HAPPY;
+    if (model->state == FACE_STATE_SLEEP) return REF_SLEEPY;
+    return REF_NEUTRAL;
+}
+
+static unsigned reference_open_step(const face_model_t *model, bool left)
+{
+    if (model->state == FACE_STATE_SLEEP) return 0;
+    const reference_expression_t *expression = reference_expression(model);
+    const unsigned cap = left ? expression->left_open_cap : expression->right_open_cap;
+    return (unsigned)floor(model->eye_open_step * cap / 12.0 + 0.5);
+}
+
+static reference_rect_t reference_mouth(const face_model_t *model)
+{
+    const reference_expression_t *expression = reference_expression(model);
+    const double rest = expression->mouth_rest_open_milli / 1000.0;
+    const double audio = model->state == FACE_STATE_SPEAKING ? model->mouth_level / 100.0 : 0.0;
+    const double open = rest + (1 - rest) * audio;
+    const double width = fmin(90, fmax(50, 90 - 40 * open + expression->mouth_width_delta * (1 - open)));
+    const double height = fmin(58, fmax(8, 8 + 50 * open + expression->mouth_height_delta * (1 - open)));
+    const reference_rect_t rectangle = {
+        115 + floor((90 - width) / 2 + 0.5) + expression->mouth_dx,
+        119 + floor((58 - height) / 2 + 0.5) + expression->mouth_dy + model->breath_offset,
+        floor(width + 0.5), floor(height + 0.5)
+    };
+    return rectangle;
+}
+
 static bool event(face_model_t *model, face_event_kind_t kind, int value,
                   uint64_t now_ms)
 {
@@ -38,46 +105,47 @@ static uint64_t frame_hash(const uint16_t *pixels, size_t count)
 /* Independent coverage oracle: invert the documented projection at each
  * pixel center, then test the pinned native circles, masks and Port rectangle.
  * Labels are deliberately excluded from the 240x180 canonical face region. */
-static bool reference_eye(face_state_t state, unsigned open_step, bool left,
-                          double x, double y, double gaze_x, double gaze_y)
+static bool reference_eye(reference_emotion_t emotion, unsigned open_step, bool left,
+                          double x, double y, double gaze_x, double gaze_y,
+                          int iris_dx, int iris_dy)
 {
     const double center_x = left ? 90.0 : 230.0;
     const double center_y = left ? 93.0 : 96.0;
     const double local_x = x - center_x + 12.0;
     const double local_y = y - center_y + 12.0;
     if (local_x < 0 || local_x >= 24 || local_y < 0 || local_y >= 24) return false;
-    const double dx = x - center_x - 2.0 * gaze_x;
-    const double dy = y - center_y - 2.0 * gaze_y;
+    const double dx = x - center_x - 2.0 * gaze_x - iris_dx;
+    const double dy = y - center_y - 2.0 * gaze_y - iris_dy;
     if (dx * dx + dy * dy > 64.0) return false;
     const double covered_height = 24.0 * (1.0 - open_step / 12.0);
-    if (state == FACE_STATE_ERROR) {
+    if (emotion == REF_SAD) {
         const double outer = (24.0 + covered_height) / 2.0;
         const double left_height = left ? outer : covered_height;
         const double right_height = left ? covered_height : outer;
         return local_y >= left_height + (right_height - left_height) * local_x / 24.0;
     }
-    if (state == FACE_STATE_HAPPY) {
+    if (emotion == REF_HAPPY) {
         return local_y >= covered_height * 0.6 && local_y < 14.4;
     }
-    if (state == FACE_STATE_SLEEP) return local_y >= 12.0 + covered_height / 2.0;
+    if (emotion == REF_SLEEPY) return local_y >= 12.0 + covered_height / 2.0;
     return local_y >= covered_height;
 }
 
 static bool reference_pixel(const face_model_t *model, size_t x, size_t y)
 {
     const double native_x = (x + 0.5) / 0.75;
-    const double native_y = (y + 0.5 - 30.0) / 0.75 - model->breath_offset;
-    if (reference_eye(model->state, model->eye_open_step, true, native_x, native_y,
-                      model->gaze_x, model->gaze_y) ||
-        reference_eye(model->state, model->eye_open_step, false, native_x, native_y,
-                      model->gaze_x, model->gaze_y)) return true;
-    const double open = model->state == FACE_STATE_SPEAKING ? model->mouth_level / 100.0 : 0.0;
-    const double width = 90.0 - 40.0 * open;
-    const double height = 8.0 + 50.0 * open;
-    const double left = 115.0 + floor((90.0 - width) / 2.0 + 0.5);
-    const double top = 119.0 + floor((58.0 - height) / 2.0 + 0.5);
-    return native_x >= left && native_x < left + floor(width + 0.5) &&
-           native_y >= top && native_y < top + floor(height + 0.5);
+    const double native_y = (y + 0.5 - 30.0) / 0.75;
+    const reference_expression_t *expression = reference_expression(model);
+    const reference_emotion_t emotion = reference_emotion(model);
+    if (reference_eye(emotion, reference_open_step(model, true), true,
+                      native_x, native_y - model->breath_offset, model->gaze_x, model->gaze_y,
+                      expression->iris_dx, expression->iris_dy) ||
+        reference_eye(emotion, reference_open_step(model, false), false,
+                      native_x, native_y - model->breath_offset, model->gaze_x, model->gaze_y,
+                      expression->iris_dx, expression->iris_dy)) return true;
+    const reference_rect_t mouth = reference_mouth(model);
+    return native_x >= mouth.x && native_x < mouth.x + mouth.width &&
+           native_y >= mouth.y && native_y < mouth.y + mouth.height;
 }
 
 static void assert_canonical_frame(const face_model_t *model, const uint16_t *frame)
@@ -87,8 +155,8 @@ static void assert_canonical_frame(const face_model_t *model, const uint16_t *fr
             const uint16_t expected = reference_pixel(model, x, y) ? 0xFFFF : 0x0000;
             const uint16_t actual = frame[y * FACE_WIDTH + x];
             if (actual != expected) {
-                fprintf(stderr, "canonical pixel mismatch: state=%s open=%u mouth=%u (%zu,%zu) expected=%04x actual=%04x\n",
-                        face_state_name(model->state), model->eye_open_step,
+                fprintf(stderr, "canonical pixel mismatch: expression=%s state=%s open=%u mouth=%u (%zu,%zu) expected=%04x actual=%04x\n",
+                        reference_expression(model)->id, face_state_name(model->state), model->eye_open_step,
                         model->mouth_level, x, y, (unsigned)expected, (unsigned)actual);
                 assert(actual == expected);
             }
@@ -507,17 +575,20 @@ static void test_renderer_clips_and_rejects_short_buffers(void)
         uint16_t *buffer = malloc((area + 4) * sizeof(*buffer));
         assert(buffer != NULL);
         for (unsigned state = 0; state < FACE_STATE_COUNT; ++state) {
-            face_model_init(&model, false, 0);
-            assert(event(&model, STATE_EVENTS[state], 0, 1));
-            if (state == FACE_STATE_SPEAKING) {
-                assert(event(&model, FACE_EVENT_MOUTH_LEVEL, 100, 2));
+            for (unsigned expression = 0; expression < FACE_EXPRESSION_COUNT; ++expression) {
+                face_model_init(&model, false, 0);
+                assert(event(&model, STATE_EVENTS[state], 0, 1));
+                assert(face_model_set_expression(&model, (face_expression_t)expression));
+                if (state == FACE_STATE_SPEAKING) {
+                    assert(event(&model, FACE_EVENT_MOUTH_LEVEL, 100, 2));
+                }
+                for (size_t i = 0; i < area + 4; ++i) buffer[i] = 0x55AA;
+                assert(face_render_rgb565(&model, buffer + 2, area, width, height));
+                assert(buffer[0] == 0x55AA && buffer[1] == 0x55AA);
+                assert(buffer[area + 2] == 0x55AA && buffer[area + 3] == 0x55AA);
+                /* Every expression overwrites the complete canvas and clips. */
+                for (size_t i = 2; i < area + 2; ++i) assert(buffer[i] != 0x55AA);
             }
-            for (size_t i = 0; i < area + 4; ++i) buffer[i] = 0x55AA;
-            assert(face_render_rgb565(&model, buffer + 2, area, width, height));
-            assert(buffer[0] == 0x55AA && buffer[1] == 0x55AA);
-            assert(buffer[area + 2] == 0x55AA && buffer[area + 3] == 0x55AA);
-            /* Rendering overwrites every pixel, including larger-frame margins. */
-            for (size_t i = 2; i < area + 2; ++i) assert(buffer[i] != 0x55AA);
         }
         free(buffer);
     }
@@ -547,6 +618,10 @@ static void test_renderer_clips_and_rejects_short_buffers(void)
     assert(memcmp(small, expected, sizeof(small)) == 0);
     face_model_init(&model, false, 0);
     model.gaze_y = INFINITY;
+    assert(!face_render_rgb565(&model, small, 4, 2, 2));
+    assert(memcmp(small, expected, sizeof(small)) == 0);
+    face_model_init(&model, false, 0);
+    model.expression = FACE_EXPRESSION_COUNT;
     assert(!face_render_rgb565(&model, small, 4, 2, 2));
     assert(memcmp(small, expected, sizeof(small)) == 0);
 }
@@ -664,6 +739,201 @@ static void test_face_roi_and_label_boundaries(void)
     free(neutral);
 }
 
+static void test_default_full_frame_regression(void)
+{
+    /* Captured before expression support from the independently retained
+     * /tmp/nemossi-expression-baseline-tests and its 13 PPM fixtures. */
+    const uint64_t state_hashes[FACE_STATE_COUNT] = {
+        UINT64_C(0xF357A0A8F8F07D67), UINT64_C(0x4A3BE9715A066E4A),
+        UINT64_C(0x535F1847E6139899), UINT64_C(0x702A8E4F12F167D9),
+        UINT64_C(0xF39A464A3DA17AFB), UINT64_C(0x679B426B46D7230D),
+        UINT64_C(0xD7A7E54D404FC8DF), UINT64_C(0x47A87898557B82B7),
+        UINT64_C(0x4AD39E5FAB0985BC)
+    };
+    uint16_t *frame = malloc(FRAME_PIXELS * sizeof(*frame));
+    assert(frame != NULL);
+    face_model_t model;
+    for (unsigned state = 0; state < FACE_STATE_COUNT; ++state) {
+        face_model_init(&model, false, 0);
+        assert(model.expression == FACE_EXPRESSION_DEFAULT);
+        assert(event(&model, STATE_EVENTS[state], 0, 0));
+        assert(face_render_rgb565(&model, frame, FRAME_PIXELS, FACE_WIDTH, FACE_HEIGHT));
+        assert(frame_hash(frame, FRAME_PIXELS) == state_hashes[state]);
+    }
+    face_model_init(&model, false, 0);
+    model.eye_open_step = 2;
+    model.blink_closed = true;
+    assert(face_render_rgb565(&model, frame, FRAME_PIXELS, FACE_WIDTH, FACE_HEIGHT));
+    assert(frame_hash(frame, FRAME_PIXELS) == UINT64_C(0xC34AABB3AA61AC67));
+    const int levels[] = {0, 50, 100};
+    const uint64_t mouth_hashes[] = {
+        UINT64_C(0x702A8E4F12F167D9), UINT64_C(0xD50F62089BE446DD), UINT64_C(0xD8040948E31610B9)
+    };
+    face_model_init(&model, false, 0);
+    assert(event(&model, FACE_EVENT_SPEAKING, 0, 0));
+    for (size_t index = 0; index < sizeof(levels) / sizeof(levels[0]); ++index) {
+        assert(event(&model, FACE_EVENT_MOUTH_LEVEL, levels[index], 0));
+        assert(face_render_rgb565(&model, frame, FRAME_PIXELS, FACE_WIDTH, FACE_HEIGHT));
+        assert(frame_hash(frame, FRAME_PIXELS) == mouth_hashes[index]);
+    }
+    free(frame);
+}
+
+static void assert_same_status(face_status_t left, face_status_t right)
+{
+    assert(left.state == right.state && left.demo_mode == right.demo_mode);
+    assert(left.input_stale == right.input_stale && left.blink_closed == right.blink_closed);
+    assert(left.mouth_level == right.mouth_level);
+}
+
+static void test_expression_table_setter_and_clock_invariance(void)
+{
+    const face_expression_t ids[] = {
+        FACE_EXPRESSION_DEFAULT, FACE_EXPRESSION_JOY, FACE_EXPRESSION_CURIOUS,
+        FACE_EXPRESSION_PONDERING, FACE_EXPRESSION_SURPRISED,
+        FACE_EXPRESSION_DROWSY, FACE_EXPRESSION_DOWNCAST
+    };
+    const face_expression_emotion_t emotions[] = {
+        FACE_EXPRESSION_EMOTION_AUTO, FACE_EXPRESSION_EMOTION_HAPPY,
+        FACE_EXPRESSION_EMOTION_NEUTRAL, FACE_EXPRESSION_EMOTION_SLEEPY,
+        FACE_EXPRESSION_EMOTION_SAD
+    };
+    assert(FACE_EXPRESSION_COUNT == 7);
+    for (unsigned index = 0; index < FACE_EXPRESSION_COUNT; ++index) {
+        assert((unsigned)ids[index] == index);
+        const reference_expression_t *expected = &EXPRESSION_REFERENCES[index];
+        const face_expression_design_t *actual = &FACE_EXPRESSION_DESIGNS[index];
+        assert(strcmp(actual->id, expected->id) == 0);
+        assert(actual->emotion == emotions[expected->emotion]);
+        assert(actual->left_open_cap == expected->left_open_cap);
+        assert(actual->right_open_cap == expected->right_open_cap);
+        assert(actual->iris_dx == expected->iris_dx && actual->iris_dy == expected->iris_dy);
+        assert(actual->mouth_rest_open_milli == expected->mouth_rest_open_milli);
+        assert(actual->mouth_width_delta == expected->mouth_width_delta);
+        assert(actual->mouth_height_delta == expected->mouth_height_delta);
+        assert(actual->mouth_dx == expected->mouth_dx && actual->mouth_dy == expected->mouth_dy);
+    }
+    face_model_t model;
+    for (unsigned state = 0; state < FACE_STATE_COUNT; ++state) {
+        face_model_init_seeded(&model, false, 100, 48);
+        assert(event(&model, STATE_EVENTS[state], 0, 175));
+        if (state == FACE_STATE_SPEAKING) assert(event(&model, FACE_EVENT_MOUTH_LEVEL, 47, 180));
+        for (unsigned expression = 0; expression < FACE_EXPRESSION_COUNT; ++expression) {
+            const face_status_t before = face_model_status(&model);
+            face_model_t expected = model;
+            expected.expression = (face_expression_t)expression;
+            assert(face_model_set_expression(&model, (face_expression_t)expression));
+            assert(memcmp(&model, &expected, sizeof(model)) == 0);
+            assert_same_status(before, face_model_status(&model));
+            /* Valid reselection is accepted but does not alter any model byte. */
+            assert(face_model_set_expression(&model, (face_expression_t)expression));
+            assert(memcmp(&model, &expected, sizeof(model)) == 0);
+        }
+        const face_model_t saved = model;
+        const face_expression_t invalid[] = {(face_expression_t)-1, FACE_EXPRESSION_COUNT, (face_expression_t)INT_MAX};
+        for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+            assert(!face_model_set_expression(&model, invalid[index]));
+            assert(memcmp(&model, &saved, sizeof(model)) == 0);
+        }
+    }
+    assert(!face_model_set_expression(NULL, FACE_EXPRESSION_JOY));
+    face_model_init(&model, false, 0);
+    model.state = (face_state_t)INT_MAX;
+    face_model_t saved = model;
+    assert(!face_model_set_expression(&model, FACE_EXPRESSION_JOY));
+    assert(memcmp(&model, &saved, sizeof(model)) == 0);
+    face_model_init(&model, false, 0);
+    model.expression = FACE_EXPRESSION_COUNT;
+    saved = model;
+    assert(!face_model_set_expression(&model, FACE_EXPRESSION_DEFAULT));
+    assert(memcmp(&model, &saved, sizeof(model)) == 0);
+
+    face_model_t default_model;
+    face_model_init(&model, false, 0);
+    assert(event(&model, FACE_EVENT_SPEAKING, 0, 100));
+    assert(event(&model, FACE_EVENT_MOUTH_LEVEL, 47, 175));
+    default_model = model;
+    assert(face_model_set_expression(&model, FACE_EXPRESSION_SURPRISED));
+    const uint64_t times[] = {924, 925, 5174, 5175};
+    for (size_t index = 0; index < sizeof(times) / sizeof(times[0]); ++index) {
+        (void)face_model_tick(&model, times[index]);
+        (void)face_model_tick(&default_model, times[index]);
+        assert_same_motion(&model, &default_model);
+        assert_same_status(face_model_status(&model), face_model_status(&default_model));
+        face_model_t expected = default_model;
+        expected.expression = FACE_EXPRESSION_SURPRISED;
+        assert(memcmp(&model, &expected, sizeof(model)) == 0);
+    }
+    assert(model.state == FACE_STATE_IDLE && model.input_stale && model.mouth_level == 0);
+    assert(event(&model, FACE_EVENT_DEMO_ENABLE, 0, 6000));
+    assert(model.expression == FACE_EXPRESSION_SURPRISED);
+    assert(face_model_set_expression(&model, FACE_EXPRESSION_CURIOUS));
+    (void)face_model_tick(&model, 15000);
+    assert(model.demo_mode && model.expression == FACE_EXPRESSION_CURIOUS);
+    assert(event(&model, FACE_EVENT_DEMO_DISABLE, 0, 15001));
+    assert(model.expression == FACE_EXPRESSION_CURIOUS && model.state == FACE_STATE_IDLE);
+}
+
+static void test_expression_raster_crossproduct(void)
+{
+    uint16_t *frame = malloc(FRAME_PIXELS * sizeof(*frame));
+    assert(frame != NULL);
+    face_model_t model;
+    const unsigned levels[] = {0, 50, 100};
+    for (unsigned expression = 0; expression < FACE_EXPRESSION_COUNT; ++expression) {
+        for (unsigned state = 0; state < FACE_STATE_COUNT; ++state) {
+            face_model_init(&model, false, 0);
+            assert(event(&model, STATE_EVENTS[state], 0, 0));
+            assert(face_model_set_expression(&model, (face_expression_t)expression));
+            for (unsigned base_step = 0; base_step <= 12; ++base_step) {
+                model.eye_open_step = (uint8_t)base_step;
+                model.blink_closed = base_step <= 2 || state == FACE_STATE_SLEEP;
+                const size_t level_count = state == FACE_STATE_SPEAKING ? 3 : 1;
+                for (size_t level = 0; level < level_count; ++level) {
+                    model.mouth_level = (uint8_t)levels[level];
+                    assert(face_render_rgb565(&model, frame, FRAME_PIXELS, FACE_WIDTH, FACE_HEIGHT));
+                    assert_canonical_frame(&model, frame);
+                    const reference_rect_t mouth = reference_mouth(&model);
+                    assert(mouth.width >= 50 && mouth.width <= 90 && mouth.height >= 8 && mouth.height <= 58);
+                }
+            }
+        }
+        const double gaze_offsets[][2] = {{0.2, -0.2}, {-0.2, 0.2}, {2, -2}};
+        for (size_t index = 0; index < sizeof(gaze_offsets) / sizeof(gaze_offsets[0]); ++index) {
+            face_model_init(&model, false, 0);
+            assert(event(&model, FACE_EVENT_SPEAKING, 0, 0));
+            assert(face_model_set_expression(&model, (face_expression_t)expression));
+            model.mouth_level = 50;
+            model.eye_open_step = 3;
+            model.gaze_x = gaze_offsets[index][0];
+            model.gaze_y = gaze_offsets[index][1];
+            model.breath_offset = index == 0 ? -6 : 6;
+            assert(face_render_rgb565(&model, frame, FRAME_PIXELS, FACE_WIDTH, FACE_HEIGHT));
+            assert_canonical_frame(&model, frame);
+        }
+    }
+    const int resting_mouths[7][4] = {
+        {115,144,90,8}, {115,143,90,10}, {121,143,78,10},
+        {120,144,72,8}, {121,137,79,22}, {123,145,74,8}, {121,147,78,8}
+    };
+    for (unsigned expression = 0; expression < FACE_EXPRESSION_COUNT; ++expression) {
+        face_model_init(&model, false, 0);
+        assert(face_model_set_expression(&model, (face_expression_t)expression));
+        const reference_rect_t mouth = reference_mouth(&model);
+        assert(mouth.x == resting_mouths[expression][0] && mouth.y == resting_mouths[expression][1]);
+        assert(mouth.width == resting_mouths[expression][2] && mouth.height == resting_mouths[expression][3]);
+    }
+    /* A half-step cap rounds upward; it must not truncate or use min(base,cap). */
+    face_model_init(&model, false, 0);
+    assert(face_model_set_expression(&model, FACE_EXPRESSION_CURIOUS));
+    model.eye_open_step = 6;
+    assert(reference_open_step(&model, false) == 5);
+    assert(face_model_set_expression(&model, FACE_EXPRESSION_PONDERING));
+    model.eye_open_step = 3;
+    assert(reference_open_step(&model, true) == 2 && reference_open_step(&model, false) == 3);
+    free(frame);
+}
+
 static FILE *open_fixture_file(const char *directory, const char *name)
 {
     char path[4096];
@@ -685,6 +955,40 @@ static void write_bounds_json(FILE *file, bounds_t bounds)
         fprintf(file, "{\"pixelBBox\":[%d,%d,%d,%d],\"whitePixels\":%zu}",
                 bounds.left, bounds.top, bounds.right, bounds.bottom, bounds.count);
     }
+}
+
+static const char *reference_emotion_name(reference_emotion_t emotion)
+{
+    static const char *const names[] = {"AUTO", "HAPPY", "NEUTRAL", "SLEEPY", "SAD"};
+    return names[emotion];
+}
+
+static void write_expression_geometry_json(FILE *file, const face_model_t *model)
+{
+    const reference_expression_t *expression = reference_expression(model);
+    const reference_rect_t mouth = reference_mouth(model);
+    fprintf(file, "\"expression\":\"%s\",\"expressionParameters\":{"
+            "\"emotion\":\"%s\",\"left_open_cap\":%u,\"right_open_cap\":%u,"
+            "\"iris_dx\":%d,\"iris_dy\":%d,\"mouth_rest_open_milli\":%u,"
+            "\"mouth_width_delta\":%d,\"mouth_height_delta\":%d,\"mouth_dx\":%d,\"mouth_dy\":%d},"
+            "\"effectiveEmotion\":\"%s\",\"effectiveLeftEyeOpenStep\":%u,\"effectiveRightEyeOpenStep\":%u,"
+            "\"irisOffset\":{\"x\":%d,\"y\":%d},"
+            "\"nativeLeftIris\":{\"x\":%.17g,\"y\":%.17g,\"radius\":8},"
+            "\"nativeRightIris\":{\"x\":%.17g,\"y\":%.17g,\"radius\":8},"
+            "\"nativeMouth\":{\"x\":%.17g,\"y\":%.17g,\"width\":%.17g,\"height\":%.17g},"
+            "\"projectedMouth\":{\"x\":%.17g,\"y\":%.17g,\"width\":%.17g,\"height\":%.17g},",
+            expression->id, reference_emotion_name(expression->emotion),
+            expression->left_open_cap, expression->right_open_cap,
+            expression->iris_dx, expression->iris_dy, expression->mouth_rest_open_milli,
+            expression->mouth_width_delta, expression->mouth_height_delta, expression->mouth_dx, expression->mouth_dy,
+            reference_emotion_name(reference_emotion(model)), reference_open_step(model, true), reference_open_step(model, false),
+            expression->iris_dx, expression->iris_dy,
+            90 + 2 * model->gaze_x + expression->iris_dx,
+            93 + 2 * model->gaze_y + expression->iris_dy + model->breath_offset,
+            230 + 2 * model->gaze_x + expression->iris_dx,
+            96 + 2 * model->gaze_y + expression->iris_dy + model->breath_offset,
+            mouth.x, mouth.y, mouth.width, mouth.height,
+            mouth.x * 0.75, 30 + mouth.y * 0.75, mouth.width * 0.75, mouth.height * 0.75);
 }
 
 static bool dump_frame(const char *directory, const char *name,
@@ -714,10 +1018,13 @@ static bool dump_frame(const char *directory, const char *name,
     const bool closed = fclose(file) == 0;
     if (!first) fputs(",\n", metadata);
     fprintf(metadata, "{\"file\":\"%s\",\"state\":\"%s\",\"mouthLevel\":%u,\"eyeOpenStep\":%u,"
-            "\"breath\":%d,\"gaze\":{\"x\":%.17g,\"y\":%.17g},\"faceHash\":\"%016" PRIx64 "\",\"leftEye\":",
+            "\"breath\":%d,\"gaze\":{\"x\":%.17g,\"y\":%.17g},\"faceHash\":\"%016" PRIx64
+            "\",\"fullFrameHash\":\"%016" PRIx64 "\",",
             filename, face_state_name(model->state), (unsigned)model->mouth_level,
             (unsigned)model->eye_open_step, (int)model->breath_offset,
-            model->gaze_x, model->gaze_y, frame_hash(frame + 30 * FACE_WIDTH, 180 * FACE_WIDTH));
+            model->gaze_x, model->gaze_y, frame_hash(frame + 30 * FACE_WIDTH, 180 * FACE_WIDTH), frame_hash(frame, FRAME_PIXELS));
+    write_expression_geometry_json(metadata, model);
+    fputs("\"leftEye\":", metadata);
     write_bounds_json(metadata, white_bounds(frame, 40, 75, 100, 115));
     fputs(",\"rightEye\":", metadata);
     write_bounds_json(metadata, white_bounds(frame, 140, 75, 200, 115));
@@ -782,6 +1089,30 @@ static bool dump_fixtures(const char *directory)
         assert(event(&model, FACE_EVENT_MOUTH_LEVEL, levels[index], 0));
         ok = dump_frame(directory, names[index], &model, geometry, false);
     }
+    for (unsigned expression = 0; expression < FACE_EXPRESSION_COUNT && ok; ++expression) {
+        char name[80];
+        face_model_init(&model, false, 0);
+        assert(face_model_set_expression(&model, (face_expression_t)expression));
+        const int length = snprintf(name, sizeof(name), "expression-%s", EXPRESSION_REFERENCES[expression].id);
+        assert(length >= 0 && (size_t)length < sizeof(name));
+        ok = dump_frame(directory, name, &model, geometry, false);
+        if (!ok) break;
+        model.eye_open_step = 2;
+        model.blink_closed = true;
+        const int blink_length = snprintf(name, sizeof(name), "expression-%s-blink", EXPRESSION_REFERENCES[expression].id);
+        assert(blink_length >= 0 && (size_t)blink_length < sizeof(name));
+        ok = dump_frame(directory, name, &model, geometry, false);
+        for (size_t index = 0; index < sizeof(levels) / sizeof(levels[0]) && ok; ++index) {
+            face_model_init(&model, false, 0);
+            assert(event(&model, FACE_EVENT_SPEAKING, 0, 0));
+            assert(face_model_set_expression(&model, (face_expression_t)expression));
+            assert(event(&model, FACE_EVENT_MOUTH_LEVEL, levels[index], 0));
+            const int speaking_length = snprintf(name, sizeof(name), "expression-%s-speaking%d",
+                    EXPRESSION_REFERENCES[expression].id, levels[index]);
+            assert(speaking_length >= 0 && (size_t)speaking_length < sizeof(name));
+            ok = dump_frame(directory, name, &model, geometry, false);
+        }
+    }
     fputs("],\"mouthGeometry\":["
           "{\"level\":0,\"native\":{\"x\":115,\"y\":144,\"width\":90,\"height\":8},"
           "\"projected\":{\"x\":86.25,\"y\":138,\"width\":67.5,\"height\":6}},"
@@ -838,7 +1169,10 @@ int main(int argc, char **argv)
     test_canonical_raster_masks_and_motion();
     test_canonical_mouth_levels();
     test_face_roi_and_label_boundaries();
-    puts("face model: 12 test groups passed (state, safety, canonical raster, motion, demo, RGB565)");
+    test_default_full_frame_regression();
+    test_expression_table_setter_and_clock_invariance();
+    test_expression_raster_crossproduct();
+    puts("face model: 15 test groups passed (state, safety, canonical raster, motion, demo, expressions, RGB565)");
     if (argc == 3) {
         if (!dump_fixtures(argv[2])) return 1;
         printf("canonical PPM and geometry/motion fixtures written to %s\n", argv[2]);

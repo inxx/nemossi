@@ -16,6 +16,11 @@ and bounded seeded motion scheduling for deterministic cross-renderer checks.
 The existing normalized audio-level input controls mouth openness. No original
 Stack-chan firmware or device drivers are installed or executed.
 
+The six selectable Nemossi expressions are downstream designs, described in
+[docs/expressions.md](docs/expressions.md). Joy, drowsiness and downcast expressions
+use upstream HAPPY, SLEEPY and SAD eyelid motifs. Their caps, gaze offsets and
+mouth adjustments are Nemossi parameters; the default upstream face is preserved.
+
 The visual comparison credits the official README photograph to Stack-chan /
 meganetaaan and links the same repository. The photograph depicts the earlier
 three-button M5Stack. Current numeric geometry comes from the pinned SimpleFace

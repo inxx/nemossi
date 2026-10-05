@@ -71,7 +71,7 @@
 
       <footer class="footer">
         <div class="device-facts"><span>ESP32-S3 · 실물 미검증</span><span title="향후 외부 릴레이를 통한 허브 연결을 검토해요. Mac 직접 연결은 가정하지 않아요.">안경 · 외부 릴레이 경로 예약</span></div>
-        <div class="footer-controls"><label for="stateSelect">표정 확인</label><select id="stateSelect"><option value="auto">자동</option><option value="idle">대기</option><option value="listening">듣기</option><option value="thinking">생각</option><option value="speaking">말하기</option><option value="happy">기쁨</option><option value="confused">갸우뚱</option><option value="error">오류</option><option value="sleep">잠</option></select><button class="text-button" id="dotInfoButton" type="button" aria-haspopup="dialog">dot 연결 안내 <span aria-hidden="true">↗</span></button></div>
+        <div class="footer-controls"><div class="preview-control"><label for="expressionSelect">표정</label><select id="expressionSelect"><option value="default">기본</option><option value="joy">기쁨</option><option value="curious">궁금함</option><option value="pondering">생각 중</option><option value="surprised">놀람</option><option value="drowsy">졸림</option><option value="downcast">시무룩함</option></select></div><div class="preview-control"><label for="stateSelect">동작 확인</label><select id="stateSelect"><option value="auto">자동</option><option value="idle">대기</option><option value="listening">듣기</option><option value="thinking">생각</option><option value="speaking">말하기</option><option value="happy">기쁨</option><option value="confused">갸우뚱</option><option value="error">오류</option><option value="sleep">잠</option></select></div><button class="text-button" id="dotInfoButton" type="button" aria-haspopup="dialog">dot 연결 안내 <span aria-hidden="true">↗</span></button></div>
       </footer>
     </main>
 

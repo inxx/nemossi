@@ -32,10 +32,22 @@ export const FACE_STATES = Object.freeze({
   sleep: { label: "쉬는 중", subtitle: "잠깐 쉬고 있어요." },
 });
 
+/** Nemossi variations; the default retains the pinned upstream SimpleFace. */
+export const FACE_EXPRESSIONS = Object.freeze(Object.fromEntries([
+  { id: "default", label: "기본", emotion: "AUTO", left_open_cap: 12, right_open_cap: 12, iris_dx: 0, iris_dy: 0, mouth_rest_open_milli: 0, mouth_width_delta: 0, mouth_height_delta: 0, mouth_dx: 0, mouth_dy: 0 },
+  { id: "joy", label: "기쁨", emotion: "HAPPY", left_open_cap: 12, right_open_cap: 12, iris_dx: 0, iris_dy: 0, mouth_rest_open_milli: 0, mouth_width_delta: 0, mouth_height_delta: 2, mouth_dx: 0, mouth_dy: 0 },
+  { id: "curious", label: "궁금함", emotion: "NEUTRAL", left_open_cap: 12, right_open_cap: 9, iris_dx: 2, iris_dy: -1, mouth_rest_open_milli: 0, mouth_width_delta: -12, mouth_height_delta: 2, mouth_dx: 0, mouth_dy: 0 },
+  { id: "pondering", label: "생각 중", emotion: "NEUTRAL", left_open_cap: 8, right_open_cap: 10, iris_dx: -2, iris_dy: -2, mouth_rest_open_milli: 0, mouth_width_delta: -18, mouth_height_delta: 0, mouth_dx: -4, mouth_dy: 0 },
+  { id: "surprised", label: "놀람", emotion: "NEUTRAL", left_open_cap: 12, right_open_cap: 12, iris_dx: 0, iris_dy: -1, mouth_rest_open_milli: 280, mouth_width_delta: 0, mouth_height_delta: 0, mouth_dx: 0, mouth_dy: 0 },
+  { id: "drowsy", label: "졸림", emotion: "SLEEPY", left_open_cap: 10, right_open_cap: 10, iris_dx: 0, iris_dy: 1, mouth_rest_open_milli: 0, mouth_width_delta: -16, mouth_height_delta: 0, mouth_dx: 0, mouth_dy: 1 },
+  { id: "downcast", label: "시무룩함", emotion: "SAD", left_open_cap: 10, right_open_cap: 10, iris_dx: 0, iris_dy: 1, mouth_rest_open_milli: 0, mouth_width_delta: -12, mouth_height_delta: 0, mouth_dx: 0, mouth_dy: 3 },
+].map(row => [row.id, Object.freeze(row)])));
+
 const D = STACKCHAN_DESIGN;
 const SCALE = D.scale_numerator / D.scale_denominator;
 const clampUnit = value => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 const quantizeOpen = value => Math.round(clampUnit(value) * D.eye_open_steps);
+const expressionRow = id => Object.hasOwn(FACE_EXPRESSIONS, id) ? FACE_EXPRESSIONS[id] : FACE_EXPRESSIONS.default;
 
 export function hash32(value) {
   let x = value >>> 0;
@@ -120,18 +132,22 @@ function projectRect(rect) {
 }
 
 /** Native Port rounds local coordinates and dimensions before projection. */
-export function mouthGeometry(open, breath = 0) {
-  const value = clampUnit(open);
-  const width = D.mouth_min_width + (D.mouth_max_width - D.mouth_min_width) * (1 - value);
-  const height = D.mouth_min_height + (D.mouth_max_height - D.mouth_min_height) * value;
+export function mouthGeometry(open, breath = 0, expression = "default") {
+  const row = expressionRow(expression);
+  const rest = row.mouth_rest_open_milli / 1000;
+  const value = rest + (1 - rest) * clampUnit(open);
+  const width = Math.max(D.mouth_min_width, Math.min(D.mouth_max_width,
+    D.mouth_min_width + (D.mouth_max_width - D.mouth_min_width) * (1 - value) + row.mouth_width_delta * (1 - value)));
+  const height = Math.max(D.mouth_min_height, Math.min(D.mouth_max_height,
+    D.mouth_min_height + (D.mouth_max_height - D.mouth_min_height) * value + row.mouth_height_delta * (1 - value)));
   return {
-    x: D.mouth_x - D.mouth_max_width / 2 + Math.round((D.mouth_max_width - width) / 2),
-    y: D.mouth_y - D.mouth_max_height / 2 + Math.round((D.mouth_max_height - height) / 2) + breath,
+    x: D.mouth_x - D.mouth_max_width / 2 + Math.round((D.mouth_max_width - width) / 2) + row.mouth_dx,
+    y: D.mouth_y - D.mouth_max_height / 2 + Math.round((D.mouth_max_height - height) / 2) + breath + row.mouth_dy,
     width: Math.round(width), height: Math.round(height),
   };
 }
 
-function eyeGeometry(cx, cy, side, emotion, step, gaze, breath) {
+function eyeGeometry(cx, cy, side, emotion, step, gaze, breath, row) {
   const width = D.eyelid_width, height = D.eyelid_height;
   const x = cx - width / 2, y = cy - height / 2 + breath;
   const closedHeight = height * (1 - step / D.eye_open_steps);
@@ -153,19 +169,21 @@ function eyeGeometry(cx, cy, side, emotion, step, gaze, breath) {
   }
   return {
     side, viewport: { x, y, width, height },
-    iris: { x: cx + gaze.x * 2, y: cy + breath + gaze.y * 2, radius: D.eye_radius }, masks,
+    iris: { x: cx + gaze.x * 2 + row.iris_dx, y: cy + breath + gaze.y * 2 + row.iris_dy, radius: D.eye_radius }, masks,
   };
 }
 
-export function faceGeometry(state = "idle", mouthLevel = 0, motion = motionAt(0, true)) {
-  const emotion = ({ happy: "HAPPY", error: "SAD", confused: "DOUBTFUL", sleep: "SLEEPY" })[state] || "NEUTRAL";
+export function faceGeometry(state = "idle", mouthLevel = 0, motion = motionAt(0, true), expression = "default") {
+  const row = expressionRow(expression);
+  const stateEmotion = ({ happy: "HAPPY", error: "SAD", confused: "DOUBTFUL", sleep: "SLEEPY" })[state] || "NEUTRAL";
+  const emotion = row.emotion === "AUTO" ? stateEmotion : row.emotion;
   const eyeOpenStep = state === "sleep" ? 0 : quantizeOpen(motion.eyeOpen);
   const native = {
     eyes: [
-      eyeGeometry(D.left_eye_x, D.left_eye_y, "left", emotion, eyeOpenStep, motion.gaze, motion.breath),
-      eyeGeometry(D.right_eye_x, D.right_eye_y, "right", emotion, eyeOpenStep, motion.gaze, motion.breath),
+      eyeGeometry(D.left_eye_x, D.left_eye_y, "left", emotion, Math.round(eyeOpenStep * row.left_open_cap / D.eye_open_steps), motion.gaze, motion.breath, row),
+      eyeGeometry(D.right_eye_x, D.right_eye_y, "right", emotion, Math.round(eyeOpenStep * row.right_open_cap / D.eye_open_steps), motion.gaze, motion.breath, row),
     ],
-    mouth: mouthGeometry(state === "speaking" ? mouthLevel : 0, motion.breath),
+    mouth: mouthGeometry(state === "speaking" ? mouthLevel : 0, motion.breath, expression),
   };
   const projected = {
     eyes: native.eyes.map(eye => ({
@@ -181,8 +199,8 @@ export function faceGeometry(state = "idle", mouthLevel = 0, motion = motionAt(0
 }
 
 /** Render native geometry through the uniform 0.75 projection into 240x240. */
-export function drawStackchanFace(ctx, { state = "idle", mouthLevel = 0, brightness = 1, motion = motionAt(0, true) } = {}) {
-  const geometry = faceGeometry(state, mouthLevel, motion);
+export function drawStackchanFace(ctx, { state = "idle", mouthLevel = 0, brightness = 1, motion = motionAt(0, true), expression = "default" } = {}) {
+  const geometry = faceGeometry(state, mouthLevel, motion, expression);
   const level = Math.round(255 * Math.max(0.55, Math.min(1, Number.isFinite(brightness) ? brightness : 1)));
   const foreground = `rgb(${level},${level},${level})`;
   ctx.fillStyle = "#000000";
@@ -225,6 +243,7 @@ export class Face {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
     this.state = "idle";
+    this.expression = "default";
     this.brightness = 1;
     this.mouthLevel = 0;
     this.motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -241,7 +260,20 @@ export class Face {
     if (!FACE_STATES[state]) return;
     this.state = state;
     this.dirty = true;
-    this.canvas.setAttribute("aria-label", `네모씨: ${FACE_STATES[state].label}`);
+    this.updateLabel();
+  }
+
+  setExpression(expression) {
+    if (!Object.hasOwn(FACE_EXPRESSIONS, expression)) return false;
+    this.expression = expression;
+    this.dirty = true;
+    this.updateLabel();
+    return true;
+  }
+
+  updateLabel() {
+    const expression = this.expression === "default" ? "" : ` · ${FACE_EXPRESSIONS[this.expression].label}`;
+    this.canvas.setAttribute("aria-label", `네모씨: ${FACE_STATES[this.state].label}${expression}`);
   }
 
   setBrightness(value) {
@@ -266,7 +298,7 @@ export class Face {
   draw(time) {
     const reduced = this.motionQuery.matches;
     const motion = motionAt(time - this.motionOrigin, reduced);
-    drawStackchanFace(this.ctx, { state: this.state, mouthLevel: this.mouthLevel, brightness: this.brightness, motion });
+    drawStackchanFace(this.ctx, { state: this.state, mouthLevel: this.mouthLevel, brightness: this.brightness, motion, expression: this.expression });
     this.lastMotionTime = motion.timeMs;
     this.lastReduced = reduced;
     this.dirty = false;

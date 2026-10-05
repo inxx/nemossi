@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "face_design.h"
+#include "face_expressions.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +57,7 @@ typedef struct {
 
 typedef struct {
     face_state_t state;
+    face_expression_t expression; /* Independent artwork; DEFAULT preserves state masks. */
     bool demo_mode;
     bool input_stale; /* An active input state expired; not a network status. */
     bool blink_closed;
@@ -105,6 +107,10 @@ void face_model_init(face_model_t *model, bool demo_mode, uint64_t now_ms);
 /* The seed changes bounded blink/gaze schedules; tick cadence never changes them. */
 void face_model_init_seeded(face_model_t *model, bool demo_mode, uint64_t now_ms,
                             uint32_t blink_seed);
+
+/* Selects artwork without changing lifecycle, input deadlines or motion clock.
+ * Unknown expressions and invalid models are rejected without any mutation. */
+bool face_model_set_expression(face_model_t *model, face_expression_t expression);
 
 /* Rejects unknown events, backward time, mouth samples outside speaking, and
  * input events during demo. Disable demo explicitly before supplying input.

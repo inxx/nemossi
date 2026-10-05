@@ -322,6 +322,9 @@ $("stateSelect").addEventListener("change", event => {
   setPhase(manualState === "auto" ? "idle" : manualState);
   if (manualState === "speaking") face.setMouthLevel(0.45);
 });
+$("expressionSelect").addEventListener("change", () => {
+  face.setExpression($("expressionSelect").value);
+});
 $("settingsButton").addEventListener("click", () => settingsDialog.showModal());
 for (const id of ["closeSettingsButton", "doneSettingsButton"]) $(id).addEventListener("click", () => settingsDialog.close());
 $("dotInfoButton").addEventListener("click", () => dotDialog.showModal());

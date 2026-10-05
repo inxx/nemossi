@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Geometry, eyelid masks, mouth and easing adapted from Stack-chan SimpleFace
  * by meganetaaan, commit 2f6b5a65e30278fdbd1c5114cab6d42cdb7b7a0d.
- * Modified for Nemossi: RGB565 projection, bounded seeded motion, safety model.
+ * Modified for Nemossi: RGB565 projection, bounded seeded motion, safety model,
+ * and independent expression parameters.
  */
 #include "face.h"
 
@@ -14,9 +15,20 @@ enum {
     COLOR_FACE = 0xFFFF
 };
 
+const face_expression_design_t FACE_EXPRESSION_DESIGNS[FACE_EXPRESSION_COUNT] = {
+    {"default", FACE_EXPRESSION_EMOTION_AUTO,    12, 12,  0,  0,   0,   0, 0,  0, 0},
+    {"joy", FACE_EXPRESSION_EMOTION_HAPPY,       12, 12,  0,  0,   0,   0, 2,  0, 0},
+    {"curious", FACE_EXPRESSION_EMOTION_NEUTRAL, 12,  9,  2, -1,   0, -12, 2,  0, 0},
+    {"pondering", FACE_EXPRESSION_EMOTION_NEUTRAL,8, 10, -2, -2,   0, -18, 0, -4, 0},
+    {"surprised", FACE_EXPRESSION_EMOTION_NEUTRAL,12,12,  0, -1, 280,   0, 0,  0, 0},
+    {"drowsy", FACE_EXPRESSION_EMOTION_SLEEPY,   10, 10,  0,  1,   0, -16, 0,  0, 1},
+    {"downcast", FACE_EXPRESSION_EMOTION_SAD,    10, 10,  0,  1,   0, -12, 0,  0, 3}
+};
+
 static bool model_valid(const face_model_t *model)
 {
     return model != NULL && (unsigned)model->state < FACE_STATE_COUNT &&
+           (unsigned)model->expression < FACE_EXPRESSION_COUNT &&
            model->mouth_level <= FACE_MOUTH_LEVEL_MAX &&
            model->eye_open_step <= STACKCHAN_EYE_OPEN_STEPS &&
            model->breath_offset >= -(int)STACKCHAN_BREATH_AMPLITUDE &&
@@ -28,6 +40,15 @@ static bool model_valid(const face_model_t *model)
            model->last_mouth_ms <= model->last_tick_ms &&
            model->blink_anchor_ms <= model->last_tick_ms &&
            model->demo_since_ms <= model->last_tick_ms;
+}
+
+bool face_model_set_expression(face_model_t *model, face_expression_t expression)
+{
+    if (!model_valid(model) || (unsigned)expression >= FACE_EXPRESSION_COUNT) {
+        return false;
+    }
+    model->expression = expression;
+    return true;
 }
 
 static bool state_active(face_state_t state)
@@ -356,27 +377,38 @@ static void draw_eye(canvas_t *canvas, const face_model_t *model,
     const double h = STACKCHAN_EYELID_HEIGHT;
     const double viewport_x = cx - w / 2;
     const double viewport_y = cy - h / 2 + model->breath_offset;
-    const double closed_h = h * (1.0 - (double)model->eye_open_step / STACKCHAN_EYE_OPEN_STEPS);
+    const face_expression_design_t *design = &FACE_EXPRESSION_DESIGNS[model->expression];
+    const unsigned cap = left ? design->left_open_cap : design->right_open_cap;
+    const unsigned open_step = model->state == FACE_STATE_SLEEP ? 0u :
+        (unsigned)floor((double)model->eye_open_step * cap / STACKCHAN_EYE_OPEN_STEPS + 0.5);
+    const double closed_h = h * (1.0 - (double)open_step / STACKCHAN_EYE_OPEN_STEPS);
+    face_expression_emotion_t emotion = design->emotion;
+    if (emotion == FACE_EXPRESSION_EMOTION_AUTO) {
+        emotion = model->state == FACE_STATE_ERROR ? FACE_EXPRESSION_EMOTION_SAD :
+            model->state == FACE_STATE_SLEEP ? FACE_EXPRESSION_EMOTION_SLEEPY :
+            model->state == FACE_STATE_HAPPY ? FACE_EXPRESSION_EMOTION_HAPPY :
+            FACE_EXPRESSION_EMOTION_NEUTRAL;
+    }
     for (int y = project_y(viewport_y); y < project_y(viewport_y + h); ++y) {
         for (int x = project_x(viewport_x); x < project_x(viewport_x + w); ++x) {
             const double nx = (x + 0.5 - STACKCHAN_OFFSET_X) / projection_scale();
             const double ny = (y + 0.5 - STACKCHAN_OFFSET_Y) / projection_scale();
             const double lx = nx - viewport_x;
             const double ly = ny - viewport_y;
-            const double dx = nx - cx - 2.0 * model->gaze_x;
-            const double dy = ny - cy - model->breath_offset - 2.0 * model->gaze_y;
+            const double dx = nx - cx - 2.0 * model->gaze_x - design->iris_dx;
+            const double dy = ny - cy - model->breath_offset - 2.0 * model->gaze_y - design->iris_dy;
             if (lx < 0 || lx >= w || ly < 0 || ly >= h ||
                 dx * dx + dy * dy > STACKCHAN_EYE_RADIUS * STACKCHAN_EYE_RADIUS) continue;
             double mask_height = closed_h;
-            if (model->state == FACE_STATE_ERROR) {
+            if (emotion == FACE_EXPRESSION_EMOTION_SAD) {
                 /* SAD is upstream's slanted top eyelid, not a custom eye. */
                 const double half = (h + closed_h) / 2;
                 const double h1 = left ? half : closed_h;
                 const double h2 = left ? closed_h : half;
                 mask_height = h1 + (h2 - h1) * lx / w;
-            } else if (model->state == FACE_STATE_SLEEP) {
+            } else if (emotion == FACE_EXPRESSION_EMOTION_SLEEPY) {
                 mask_height = h * 0.5 + closed_h * 0.5;
-            } else if (model->state == FACE_STATE_HAPPY) {
+            } else if (emotion == FACE_EXPRESSION_EMOTION_HAPPY) {
                 mask_height = closed_h * 0.6;
                 if (ly >= h * 0.6) continue;
             }
@@ -387,17 +419,27 @@ static void draw_eye(canvas_t *canvas, const face_model_t *model,
 
 static void draw_mouth(canvas_t *canvas, const face_model_t *model)
 {
-    const double open = model->state == FACE_STATE_SPEAKING
+    const face_expression_design_t *design = &FACE_EXPRESSION_DESIGNS[model->expression];
+    const double voice_open = model->state == FACE_STATE_SPEAKING
         ? (double)model->mouth_level / FACE_MOUTH_LEVEL_MAX : 0.0;
-    const double width = STACKCHAN_MOUTH_MIN_WIDTH +
-        (STACKCHAN_MOUTH_MAX_WIDTH - STACKCHAN_MOUTH_MIN_WIDTH) * (1.0 - open);
-    const double height = STACKCHAN_MOUTH_MIN_HEIGHT +
-        (STACKCHAN_MOUTH_MAX_HEIGHT - STACKCHAN_MOUTH_MIN_HEIGHT) * open;
+    const double rest = design->mouth_rest_open_milli / 1000.0;
+    const double open = rest + (1.0 - rest) * voice_open;
+    double width = STACKCHAN_MOUTH_MIN_WIDTH +
+        (STACKCHAN_MOUTH_MAX_WIDTH - STACKCHAN_MOUTH_MIN_WIDTH) * (1.0 - open) +
+        design->mouth_width_delta * (1.0 - open);
+    double height = STACKCHAN_MOUTH_MIN_HEIGHT +
+        (STACKCHAN_MOUTH_MAX_HEIGHT - STACKCHAN_MOUTH_MIN_HEIGHT) * open +
+        design->mouth_height_delta * (1.0 - open);
+    if (width < STACKCHAN_MOUTH_MIN_WIDTH) width = STACKCHAN_MOUTH_MIN_WIDTH;
+    if (width > STACKCHAN_MOUTH_MAX_WIDTH) width = STACKCHAN_MOUTH_MAX_WIDTH;
+    if (height < STACKCHAN_MOUTH_MIN_HEIGHT) height = STACKCHAN_MOUTH_MIN_HEIGHT;
+    if (height > STACKCHAN_MOUTH_MAX_HEIGHT) height = STACKCHAN_MOUTH_MAX_HEIGHT;
     /* Upstream Port rounds its positive local x/y/w/h before projection. */
     const double x = STACKCHAN_MOUTH_X - STACKCHAN_MOUTH_MAX_WIDTH / 2.0 +
-        floor((STACKCHAN_MOUTH_MAX_WIDTH - width) / 2.0 + 0.5);
+        floor((STACKCHAN_MOUTH_MAX_WIDTH - width) / 2.0 + 0.5) + design->mouth_dx;
     const double y = STACKCHAN_MOUTH_Y - STACKCHAN_MOUTH_MAX_HEIGHT / 2.0 +
-        floor((STACKCHAN_MOUTH_MAX_HEIGHT - height) / 2.0 + 0.5) + model->breath_offset;
+        floor((STACKCHAN_MOUTH_MAX_HEIGHT - height) / 2.0 + 0.5) +
+        model->breath_offset + design->mouth_dy;
     rectangle(canvas, project_x(x), project_y(y),
               project_x(x + floor(width + 0.5)), project_y(y + floor(height + 0.5)), COLOR_FACE);
 }
